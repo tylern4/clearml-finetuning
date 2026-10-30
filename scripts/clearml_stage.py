@@ -29,9 +29,9 @@ def main() -> None:
     ap.add_argument("--upstream-distill", type=str, default="")
     ap.add_argument("--upstream-train", type=str, default="")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
-        "CML_TEACHER", "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"))
+        "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
-        "CML_STUDENT", "Qwen/Qwen2.5-Coder-7B-Instruct"))
+        "CML_STUDENT", "Qwen/Qwen3.5-9B"))
     ap.add_argument("--n-tasks", type=int, default=1200)
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lora-r", type=int, default=32)

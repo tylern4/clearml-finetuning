@@ -23,7 +23,7 @@ from clearml_finetuning import cml, data  # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser(description="LoRA SFT training")
     ap.add_argument("--student", default=os.environ.get("CML_STUDENT",
-                    "Qwen/Qwen2.5-Coder-7B-Instruct"))
+                    "Qwen/Qwen3.5-9B"))
     ap.add_argument("--data-task", type=str, default="", help="upstream distill task id")
     ap.add_argument("--data-dir", type=str, default="distilled", help="local data dir if already present")
     ap.add_argument("--lora-r", type=int, default=32)
@@ -74,14 +74,22 @@ def main() -> None:
     if master:
         print(f"loaded {len(sft_rows)} training rows")
 
-    # tokenize with assistant-only loss mask
+    # tokenize with assistant-only loss mask; fall back to masking the
+    # assistant suffix if the chat template lacks generation markers
     def tokenize(msgs):
-        out = tok.apply_chat_template(
-            msgs, tokenize=True, add_generation_prompt=False,
-            return_dict=True, return_assistant_tokens_mask=True,
-        )
-        ids = out["input_ids"]
-        mask = out["assistant_masks"]
+        try:
+            out = tok.apply_chat_template(
+                msgs, tokenize=True, add_generation_prompt=False,
+                return_dict=True, return_assistant_tokens_mask=True,
+            )
+            ids = out["input_ids"]
+            mask = out["assistant_masks"]
+        except Exception:
+            prompt_ids = tok.apply_chat_template(
+                msgs[:-1], tokenize=True, add_generation_prompt=True)
+            full_ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+            ids = full_ids
+            mask = [0] * len(prompt_ids) + [1] * max(0, len(full_ids) - len(prompt_ids))
         labels = [t if m == 1 else -100 for t, m in zip(ids, mask)]
         return ids, labels
 
@@ -108,7 +116,15 @@ def main() -> None:
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
     )
-    model = get_peft_model(model, lora_cfg)
+    try:
+        model = get_peft_model(model, lora_cfg)
+    except ValueError:
+        # newer architectures may rename projections; attach LoRA to all
+        # linear layers except the head instead
+        if master:
+            print("standard LoRA targets not found; falling back to all-linear")
+        lora_cfg.target_modules = "all-linear"
+        model = get_peft_model(model, lora_cfg)
     if master:
         model.print_trainable_parameters()
     model.gradient_checkpointing_enable()

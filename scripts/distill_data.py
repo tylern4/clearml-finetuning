@@ -19,7 +19,7 @@ from clearml_finetuning import cml, data, prompts  # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser(description="distill agent trajectories")
     ap.add_argument("--teacher", default=os.environ.get("CML_TEACHER",
-                    "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"))
+                    "Qwen/Qwen3.8-27B"))
     ap.add_argument("--n-tasks", type=int, default=1200, help="task inventions to attempt")
     ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--temperature", type=float, default=0.9)

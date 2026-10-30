@@ -1,8 +1,8 @@
 # defaults for the three stages (see scripts/*_*.py argparse for all knobs)
 
 stage_defaults:
-  teacher: Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
-  student: Qwen/Qwen2.5-Coder-7B-Instruct
+  teacher: Qwen/Qwen3.8-27B
+  student: Qwen/Qwen3.5-9B
   distill:
     n_tasks: 1200
     temperature: 0.9

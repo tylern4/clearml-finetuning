@@ -14,11 +14,11 @@ reports scalars/plots/debug samples natively.
 distill  ->  train  ->  eval
 ```
 
-1. **distill** — a large teacher (Qwen2.5-Coder-32B-Instruct-AWQ, vLLM, TP=4)
+1. **distill** — a large teacher (Qwen3.8-27B, vLLM, TP=4)
    generates synthetic coding-agent tasks *and* full tool-use trajectories under
    a fixed agent scaffold (`run_cmd` / `read_file` / `edit_file` / `finish`
    actions, JSONL format). Output: `train.jsonl` + `val.jsonl` artifacts.
-2. **train** — the student (Qwen2.5-Coder-7B-Instruct) is fine-tuned with LoRA
+2. **train** — the student (Qwen3.5-9B) is fine-tuned with LoRA
    (peft) on the distilled trajectories, DDP across 4 GPUs, assistant-only loss
    masking. Output: adapter checkpoint artifact.
 3. **eval** — merged student is served with vLLM: HumanEval pass@1 (executed)
@@ -59,8 +59,8 @@ Environment knobs (all optional):
 | `CLEARML_QUEUE` | agent queue name | `muller` |
 | `WF_OUTPUT_URI` | artifact/sample destination (e.g. `s3://bucket/prefix`) | clearml files server |
 | `NPROC` | torchrun process count for training | `4` |
-| `CML_TEACHER` | teacher model id | `Qwen/Qwen2.5-Coder-32B-Instruct-AWQ` |
-| `CML_STUDENT` | student model id | `Qwen/Qwen2.5-Coder-7B-Instruct` |
+| `CML_TEACHER` | teacher model id | `Qwen/Qwen3.8-27B` |
+| `CML_STUDENT` | student model id | `Qwen/Qwen3.5-9B` |
 
 ## Notes
 
