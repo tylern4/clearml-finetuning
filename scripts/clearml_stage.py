@@ -91,21 +91,22 @@ def main() -> None:
         "convert_gguf": "scripts/convert_gguf.py",
     }[stage]
 
-    cmd = [py, script,
-           "--teacher", str(params["teacher"]),
-           "--student", str(params["student"])]
     if stage == "distill":
-        cmd += ["--n-tasks", str(params["n_tasks"])]
+        cmd = [py, script, "--teacher", str(params["teacher"]),
+               "--n-tasks", str(params["n_tasks"])]
     elif stage == "train":
-        cmd += ["--data-task", str(params["upstream_distill"]),
-                "--epochs", str(params["epochs"]),
-                "--lora-r", str(params["lora_r"])]
+        cmd = [py, script, "--student", str(params["student"]),
+               "--data-task", str(params["upstream_distill"]),
+               "--epochs", str(params["epochs"]),
+               "--lora-r", str(params["lora_r"])]
     elif stage == "eval":
-        cmd += ["--adapter-task", str(params["upstream_train"]),
-                "--data-task", str(params["upstream_distill"]),
-                "--humaneval-n", str(params["humaneval_n"])]
+        cmd = [py, script, "--student", str(params["student"]),
+               "--adapter-task", str(params["upstream_train"]),
+               "--data-task", str(params["upstream_distill"]),
+               "--humaneval-n", str(params["humaneval_n"])]
     elif stage == "convert_gguf":
-        cmd += ["--adapter-task", str(params["upstream_train"])]
+        cmd = [py, script, "--student", str(params["student"]),
+               "--adapter-task", str(params["upstream_train"])]
 
     env = dict(os.environ)
     env["CLEARML_RUN"] = "1"
