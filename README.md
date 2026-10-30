@@ -11,10 +11,15 @@ reports scalars/plots/debug samples natively.
 ## Pipeline
 
 ```
-distill  ->  train  ->  eval
+distill  ->  train  ->  eval  ->  convert_gguf
 ```
 
-1. **distill** — a large teacher (Qwen3.8-27B, vLLM, TP=4)
+4. **convert_gguf** — merge the LoRA adapter into the base student, convert
+   to GGUF (pinned llama.cpp release) and quantize (Q4_K_M + Q8_0) so the
+   fine-tuned model runs on a laptop with llama.cpp/Ollama. GGUF files are
+   uploaded as artifacts.
+
+The pipeline runs as — a large teacher (Qwen3.8-27B, vLLM, TP=4)
    generates synthetic coding-agent tasks *and* full tool-use trajectories under
    a fixed agent scaffold (`run_cmd` / `read_file` / `edit_file` / `finish`
    actions, JSONL format). Output: `train.jsonl` + `val.jsonl` artifacts.
@@ -61,6 +66,20 @@ Environment knobs (all optional):
 | `NPROC` | torchrun process count for training | `4` |
 | `CML_TEACHER` | teacher model id | `Qwen/Qwen3.8-27B` |
 | `CML_STUDENT` | student model id | `Qwen/Qwen3.5-9B` |
+
+## Running on a laptop
+
+The final stage publishes quantized GGUF files as artifacts
+(`<student>-agent-Q4_K_M.gguf` etc.). Download from the task's Artifacts tab,
+then:
+
+```bash
+# llama.cpp
+llama-cli -m <student>-agent-Q4_K_M.gguf -p "your prompt"
+
+# or Ollama (Modelfile: FROM <gguf file>)
+ollama create coder-agent -f Modelfile && ollama run coder-agent
+```
 
 ## Notes
 

@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STAGES = ("distill", "train", "eval")
+STAGES = ("distill", "train", "eval", "convert_gguf")
 
 
 def main() -> None:
@@ -88,6 +88,7 @@ def main() -> None:
         "distill": "scripts/distill_data.py",
         "train": "scripts/train_student.py",
         "eval": "scripts/eval_agent.py",
+        "convert_gguf": "scripts/convert_gguf.py",
     }[stage]
 
     cmd = [py, script,
@@ -103,6 +104,8 @@ def main() -> None:
         cmd += ["--adapter-task", str(params["upstream_train"]),
                 "--data-task", str(params["upstream_distill"]),
                 "--humaneval-n", str(params["humaneval_n"])]
+    elif stage == "convert_gguf":
+        cmd += ["--adapter-task", str(params["upstream_train"])]
 
     env = dict(os.environ)
     env["CLEARML_RUN"] = "1"

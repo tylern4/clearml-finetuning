@@ -32,8 +32,11 @@ REQUIREMENTS = {
               "clearml>=2.1", "boto3", "matplotlib"],
     "eval": ["vllm>=0.11.0", "datasets>=3.0", "peft>=0.17",
              "clearml>=2.1", "boto3", "matplotlib"],
+    "convert_gguf": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17",
+                     "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3"],
 }
-STAGE_TIMEOUTS = {"distill": 6 * 3600, "train": 12 * 3600, "eval": 6 * 3600}
+STAGE_TIMEOUTS = {"distill": 6 * 3600, "train": 12 * 3600, "eval": 6 * 3600,
+                  "convert_gguf": 3 * 3600}
 
 
 def git_head():
@@ -110,8 +113,8 @@ def run_stage(name: str, stage_args: list) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["distill", "train", "eval"])
-    ap.add_argument("--from", dest="from_stage", choices=["train", "eval"])
+    ap.add_argument("--only", choices=["distill", "train", "eval", "convert_gguf"])
+    ap.add_argument("--from", dest="from_stage", choices=["train", "eval", "convert_gguf"])
     ap.add_argument("--upstream-distill", default="")
     ap.add_argument("--upstream-train", default="")
     ap.add_argument("--all", action="store_true")
@@ -130,14 +133,21 @@ def main() -> int:
         ids["train"] = run_stage("train", train_args + ["--upstream-distill", ids["distill"]])
         ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                      "--upstream-distill", ids["distill"]])
+        ids["convert_gguf"] = run_stage(
+            "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
     elif args.from_stage:
         if args.from_stage == "train":
             ids["train"] = run_stage("train", train_args + ["--upstream-distill", args.upstream_distill])
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                          "--upstream-distill", args.upstream_distill])
-        else:
+        elif args.from_stage == "eval":
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", args.upstream_train,
                                                          "--upstream-distill", args.upstream_distill])
+            ids["convert_gguf"] = run_stage(
+                "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", args.upstream_train])
+        else:
+            ids["convert_gguf"] = run_stage(
+                "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", args.upstream_train])
 
     print("\n==== clearml-finetuning pipeline summary ====")
     from clearml import Task
