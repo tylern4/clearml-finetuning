@@ -1,0 +1,20 @@
+# defaults for the three stages (see scripts/*_*.py argparse for all knobs)
+
+stage_defaults:
+  teacher: Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+  student: Qwen/Qwen2.5-Coder-7B-Instruct
+  distill:
+    n_tasks: 1200
+    temperature: 0.9
+    val_fraction: 0.02
+  train:
+    lora_r: 32
+    lora_alpha: 64
+    lr: 1.0e-4
+    epochs: 2
+    device_batch_size: 2
+    grad_accum: 8
+    max_len: 4096
+  eval:
+    humaneval_n: 0   # all 164 problems
+    adherence_n: 64
