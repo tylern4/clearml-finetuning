@@ -112,18 +112,32 @@ def main() -> None:
     # ---- 6. a small run-me README next to the files --------------------------
     readme = os.path.join(args.out_dir, "README.md")
     with open(readme, "w") as f:
+        q0 = args.quant_types.split(",")[0].strip()
         f.write(
             f"# {args.student} coding-agent GGUF\n\n"
             f"LoRA fine-tune merged into the base model, converted and quantized "
             f"with llama.cpp @ {ref}.\n\n"
-            "## Run with llama.cpp\n\n"
+            "## Interactive chat (llama.cpp)\n\n"
             "```bash\n"
-            f"llama-cli -m {base_name}-agent-{args.quant_types.split(',')[0]}.gguf -p 'your prompt'\n"
+            f"llama-cli -m {base_name}-agent-{q0}.gguf -c 8192\n"
             "```\n\n"
-            "## Run with Ollama\n\n"
-            "```\n"
-            "ollama create coder-agent -f Modelfile   # Modelfile: FROM <gguf file>\n"
-            "```\n"
+            "## One-shot\n\n"
+            "```bash\n"
+            f"llama-cli -m {base_name}-agent-{q0}.gguf -c 8192 \\\n"
+            "    -p '<task>' --no-display-prompt\n"
+            "```\n\n"
+            "The model was fine-tuned with a fixed agent scaffold (JSONL tool "
+            "actions). For scaffold-formatted responses, include the system "
+            "prompt from clearml_finetuning/prompts.py (AGENT_SYSTEM_PROMPT) as "
+            "the system message, e.g. via llama-server:\n\n"
+            "```bash\n"
+            f"llama-server -m {base_name}-agent-{q0}.gguf -c 8192\n"
+            "curl http://localhost:8080/v1/chat/completions \\\n"
+            "  -H 'Content-Type: application/json' \\\n"
+            "  -d '{\"messages\":[{\"role\":\"system\",\"content\":\"<AGENT_SYSTEM_PROMPT>\"},"
+            "{\"role\":\"user\",\"content\":\"<task>\"}]}'\n"
+            "```\n\n"
+            "GPU offload: add `-ngl 99` (CUDA/Metal); Q4_K_M runs fine CPU-only.\n"
         )
 
     if run:

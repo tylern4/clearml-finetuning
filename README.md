@@ -67,19 +67,36 @@ Environment knobs (all optional):
 | `CML_TEACHER` | teacher model id | `Qwen/Qwen3.8-27B` |
 | `CML_STUDENT` | student model id | `Qwen/Qwen3.5-9B` |
 
-## Running on a laptop
+## Running on a laptop (llama.cpp)
 
 The final stage publishes quantized GGUF files as artifacts
-(`<student>-agent-Q4_K_M.gguf` etc.). Download from the task's Artifacts tab,
-then:
+(`<student>-agent-Q4_K_M.gguf` ≈ 5.5 GB, `Q8_0` ≈ 9.5 GB). Download from the
+task's Artifacts tab, then:
 
 ```bash
-# llama.cpp
-llama-cli -m <student>-agent-Q4_K_M.gguf -p "your prompt"
+# interactive chat (the GGUF embeds the model's chat template)
+llama-cli -m qwen3.5-9b-agent-Q4_K_M.gguf -c 8192
 
-# or Ollama (Modelfile: FROM <gguf file>)
-ollama create coder-agent -f Modelfile && ollama run coder-agent
+# one-shot completion, no prompt echo
+llama-cli -m qwen3.5-9b-agent-Q4_K_M.gguf -c 8192 \
+    -p "Fix the failing test in tests/test_retry.py" --no-display-prompt
 ```
+
+The model was fine-tuned against a fixed agent scaffold (JSONL tool actions:
+`run_cmd` / `read_file` / `edit_file` / `finish`); to get scaffold-formatted
+responses, pass the system prompt from `clearml_finetuning/prompts.py`
+(`AGENT_SYSTEM_PROMPT`) as the system message. Easiest via the built-in
+OpenAI-compatible server:
+
+```bash
+llama-server -m qwen3.5-9b-agent-Q4_K_M.gguf -c 8192
+
+curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"system","content":"<AGENT_SYSTEM_PROMPT>"},{"role":"user","content":"<task>"}]}'
+```
+
+Notes: add `-ngl 99` to offload all layers if the laptop has a CUDA/Metal
+GPU; CPU-only inference with Q4_K_M runs at usable speeds for a 9B model.
 
 ## Notes
 
