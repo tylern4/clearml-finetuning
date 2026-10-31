@@ -24,16 +24,20 @@ from clearml_finetuning import cml, data, prompts  # noqa: E402
 
 def load_humaneval(attempts=3):
     """Fetch HumanEval directly (avoids the datasets/hub version matrix)."""
-    url = "https://raw.githubusercontent.com/openai/human-eval/main/data/HumanEval.jsonl.gz"
+    urls = [
+        "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz",
+        "https://raw.githubusercontent.com/openai/human-eval/main/data/HumanEval.jsonl.gz",
+    ]
     last = None
-    for i in range(attempts):
-        try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                blob = gzip.decompress(r.read())
-            return [json.loads(l) for l in blob.decode().splitlines() if l.strip()]
-        except Exception as e:
-            last = e
-            print(f"HumanEval download failed ({e}); retry {i + 1}/{attempts}")
+    for url in urls:
+        for i in range(attempts):
+            try:
+                with urllib.request.urlopen(url, timeout=60) as r:
+                    blob = gzip.decompress(r.read())
+                return [json.loads(l) for l in blob.decode().splitlines() if l.strip()]
+            except Exception as e:
+                last = e
+                print(f"HumanEval download failed ({e}); retry {i + 1}/{attempts}")
     raise last
 
 
