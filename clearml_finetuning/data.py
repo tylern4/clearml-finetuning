@@ -3,6 +3,16 @@
 import hashlib
 import json
 import os
+import re
+
+_THINK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think(text):
+    """Remove reasoning traces (<think ...>...</think) from model output."""
+    if not isinstance(text, str):
+        return text
+    return _THINK_RE.sub("", text).strip()
 
 
 def trajectory_to_messages(system_prompt, task_text, actions):
@@ -25,6 +35,7 @@ def extract_json_object(text):
     """
     if not isinstance(text, str):
         return None
+    text = strip_think(text)
     text = text.replace("<|im_end|>", "").replace("<|im_start|>", "")
     a, b = text.find("{"), text.rfind("}")
     if a < 0 or b <= a:
@@ -43,6 +54,7 @@ def extract_jsonl_actions(text):
     """
     if not isinstance(text, str):
         return []
+    text = strip_think(text)
     text = text.replace("<|im_end|>", "").replace("<|im_start|>", "")
     return [line.strip() for line in text.splitlines() if line.strip().startswith("{")]
 

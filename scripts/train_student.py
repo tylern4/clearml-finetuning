@@ -63,14 +63,10 @@ def main() -> None:
         for f in os.listdir(local):
             shutil.copy(os.path.join(local, f), args.data_dir)
 
+    from clearml_finetuning import prompts
+
     rows = data.read_jsonl(os.path.join(args.data_dir, "train.jsonl"))
-    system_prompt = None
-    sft_rows = []
-    for row in rows:
-        msgs = row["messages"]
-        if system_prompt is None:
-            system_prompt = msgs[0]["content"]
-        sft_rows.append(msgs)
+    sft_rows = [r["messages"] for r in data.build_sft_rows(rows, prompts.AGENT_SYSTEM_PROMPT)]
     if master:
         print(f"loaded {len(sft_rows)} training rows")
 

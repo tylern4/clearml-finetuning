@@ -55,11 +55,12 @@ TRAJECTORY_INSTRUCTION = """\
 
 Task: {task}
 
-You are the coding agent described in the system prompt. Produce the full
-action-by-action solution as JSONL: each line is one action object, starting
-with read/run actions to inspect the relevant files, then edit/write actions,
-then a verification run_cmd (e.g. running the test), and finally a finish
-action with a one-paragraph summary. Keep it realistic and terse: 4-10 actions.
+Produce the full action-by-action solution as JSONL using ONLY the action
+schema from the system prompt: each line is one action object, starting with
+read/run actions to inspect the relevant files, then edit/write actions, then
+a verification run_cmd (e.g. running the test), and finally a finish action
+with a one-paragraph summary. Keep it realistic and terse: 4-10 actions.
+Output the JSONL only - no commentary, no markdown fences.
 The tool outputs are not shown; write only your actions.
 """
 

@@ -40,15 +40,23 @@ def main() -> None:
         gpu_memory_utilization=0.90,
     )
     tok = llm.get_tokenizer()
-    chat = lambda text: tok.apply_chat_template(
-        [{"role": "user", "content": text}], tokenize=False, add_generation_prompt=True)
+
+    def chat(messages):
+        """Template a chat; disable thinking when the template supports it."""
+        try:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False)
+        except TypeError:
+            return tok.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True)
 
     rng = random.Random(args.seed)
 
     # ---- pass 1: invent tasks ------------------------------------------------
     task_prompts = [prompts.sample_task_prompt(rng) for _ in range(args.n_tasks)]
     sp_tasks = SamplingParams(temperature=args.temperature, top_p=0.95, max_tokens=400)
-    outs = llm.generate([chat(p) for p in task_prompts], sp_tasks)
+    outs = llm.generate([chat([{"role": "user", "content": p}]) for p in task_prompts], sp_tasks)
 
     tasks, seen, rejects = [], set(), []
     for out in outs:
@@ -77,10 +85,12 @@ def main() -> None:
     # ---- pass 2: generate trajectories --------------------------------------
     sp_traj = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=1400)
     traj_prompts = [
-        prompts.TRAJECTORY_INSTRUCTION.format(
-            repo_context=t["repo_context"], task=t["task"]) for t in tasks
+        [{"role": "system", "content": prompts.AGENT_SYSTEM_PROMPT},
+         {"role": "user", "content": prompts.TRAJECTORY_INSTRUCTION.format(
+             repo_context=t["repo_context"], task=t["task"])}]
+        for t in tasks
     ]
-    outs = llm.generate([chat(p) for p in traj_prompts], sp_traj)
+    outs = llm.generate([chat(m) for m in traj_prompts], sp_traj)
 
     rows, traj_rejects = [], []
     for task, out in zip(tasks, outs):
