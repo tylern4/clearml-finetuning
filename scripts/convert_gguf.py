@@ -81,8 +81,10 @@ def main() -> None:
             "https://github.com/ggml-org/llama.cpp.git", llama_dir])
 
     # ---- 4. converter deps + build llama-quantize ----------------------------
-    sh([sys.executable, "-m", "pip", "install", "-q", "-r",
-        os.path.join(llama_dir, "requirements.txt")])
+    # NOTE: do NOT install llama.cpp/requirements.txt here - it pins torch and
+    # an older transformers, downgrading the venv below what the Qwen3.5
+    # architecture needs. The converter only needs gguf (+ what's installed).
+    sh([sys.executable, "-m", "pip", "install", "-q", "gguf", "jinja2", "sentencepiece"])
     sh(["apt-get", "update", "-qq"], env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
     sh(["apt-get", "install", "-y", "-qq", "cmake", "build-essential"],
        env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"})
