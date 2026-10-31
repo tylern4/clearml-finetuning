@@ -12,6 +12,8 @@ import os
 import sys
 import time
 
+os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch  # noqa: E402
@@ -31,9 +33,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=20)
     ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--device-batch-size", type=int, default=2)
+    ap.add_argument("--device-batch-size", type=int, default=1,
+                    help="9B bf16 + LoRA on 40GB A100s: keep at 1")
     ap.add_argument("--grad-accum", type=int, default=8)
-    ap.add_argument("--max-len", type=int, default=4096)
+    ap.add_argument("--max-len", type=int, default=2048)
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
