@@ -17,7 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STAGES = ("distill", "train", "eval", "convert_gguf")
+STAGES = ("distill", "scicode_data", "train", "eval", "convert_gguf")
 
 
 def main() -> None:
@@ -28,6 +28,7 @@ def main() -> None:
     ap.add_argument("--register", action="store_true")
     ap.add_argument("--upstream-distill", type=str, default="")
     ap.add_argument("--upstream-train", type=str, default="")
+    ap.add_argument("--upstream-scicode", type=str, default="")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
@@ -58,6 +59,7 @@ def main() -> None:
             "humaneval_n": args.humaneval_n,
             "upstream_distill": args.upstream_distill,
             "upstream_train": args.upstream_train,
+            "upstream_scicode": args.upstream_scicode,
             "nproc": int(os.environ.get("NPROC", "4")),
         },
         name="stage",
@@ -86,6 +88,7 @@ def main() -> None:
     py = sys.executable
     script = {
         "distill": "scripts/distill_data.py",
+        "scicode_data": "scripts/scicode_data.py",
         "train": "scripts/train_student.py",
         "eval": "scripts/eval_agent.py",
         "convert_gguf": "scripts/convert_gguf.py",
@@ -94,15 +97,19 @@ def main() -> None:
     if stage == "distill":
         cmd = [py, script, "--teacher", str(params["teacher"]),
                "--n-tasks", str(params["n_tasks"])]
+    elif stage == "scicode_data":
+        cmd = [py, script]
     elif stage == "train":
         cmd = [py, script, "--student", str(params["student"]),
                "--data-task", str(params["upstream_distill"]),
+               "--scicode-task", str(params["upstream_scicode"]),
                "--epochs", str(params["epochs"]),
                "--lora-r", str(params["lora_r"])]
     elif stage == "eval":
         cmd = [py, script, "--student", str(params["student"]),
                "--adapter-task", str(params["upstream_train"]),
                "--data-task", str(params["upstream_distill"]),
+               "--scicode-task", str(params["upstream_scicode"]),
                "--humaneval-n", str(params["humaneval_n"])]
     elif stage == "convert_gguf":
         cmd = [py, script, "--student", str(params["student"]),

@@ -28,15 +28,16 @@ TERMINAL = {"completed", "failed", "stopped"}
 # per-stage venv isolation: vllm and peft stacks must not share a venv
 REQUIREMENTS = {
     "distill": ["vllm>=0.11.0", "ninja", "clearml>=2.1", "boto3", "matplotlib"],
+    "scicode_data": ["clearml>=2.1", "boto3", "gdown", "h5py", "numpy"],
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
               "clearml>=2.1", "boto3", "matplotlib"],
-    "eval": ["vllm>=0.11.0", "ninja", "peft>=0.17",
+    "eval": ["vllm>=0.11.0", "ninja", "peft>=0.17", "h5py", "numpy", "scipy",
              "clearml>=2.1", "boto3", "matplotlib"],
     "convert_gguf": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17",
                      "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3"],
 }
-STAGE_TIMEOUTS = {"distill": 6 * 3600, "train": 12 * 3600, "eval": 6 * 3600,
-                  "convert_gguf": 3 * 3600}
+STAGE_TIMEOUTS = {"distill": 6 * 3600, "scicode_data": 2 * 3600, "train": 12 * 3600,
+                  "eval": 8 * 3600, "convert_gguf": 3 * 3600}
 
 
 def git_head():
@@ -113,16 +114,19 @@ def run_stage(name: str, stage_args: list) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["distill", "train", "eval", "convert_gguf"])
-    ap.add_argument("--from", dest="from_stage", choices=["train", "eval", "convert_gguf"])
+    ap.add_argument("--only", choices=["distill", "scicode_data", "train", "eval", "convert_gguf"])
+    ap.add_argument("--from", dest="from_stage",
+                    choices=["scicode_data", "train", "eval", "convert_gguf"])
     ap.add_argument("--upstream-distill", default="")
     ap.add_argument("--upstream-train", default="")
+    ap.add_argument("--upstream-scicode", default="")
     ap.add_argument("--all", action="store_true")
     args = ap.parse_args()
 
     t0 = time.time()
     ids = {}
     distill_args = ["--stage", "distill"]
+    scicode_args = ["--stage", "scicode_data"]
     train_args = ["--stage", "train"]
     eval_args = ["--stage", "eval"]
 
@@ -130,19 +134,30 @@ def main() -> int:
         ids[args.only] = run_stage(args.only, ["--stage", args.only])
     elif args.all:
         ids["distill"] = run_stage("distill", distill_args)
-        ids["train"] = run_stage("train", train_args + ["--upstream-distill", ids["distill"]])
+        ids["scicode_data"] = run_stage("scicode_data", scicode_args)
+        ids["train"] = run_stage("train", train_args + [
+            "--upstream-distill", ids["distill"],
+            "--upstream-scicode", ids["scicode_data"]])
         ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
-                                                     "--upstream-distill", ids["distill"]])
+                                                     "--upstream-distill", ids["distill"],
+                                                     "--upstream-scicode", ids["scicode_data"]])
         ids["convert_gguf"] = run_stage(
             "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
     elif args.from_stage:
-        if args.from_stage == "train":
-            ids["train"] = run_stage("train", train_args + ["--upstream-distill", args.upstream_distill])
+        if args.from_stage == "scicode_data":
+            ids["scicode_data"] = run_stage("scicode_data", scicode_args)
+        if args.from_stage in ("scicode_data", "train"):
+            scicode_id = ids.get("scicode_data", args.upstream_scicode)
+            ids["train"] = run_stage("train", train_args + [
+                "--upstream-distill", args.upstream_distill,
+                "--upstream-scicode", scicode_id])
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
-                                                         "--upstream-distill", args.upstream_distill])
+                                                         "--upstream-distill", args.upstream_distill,
+                                                         "--upstream-scicode", scicode_id])
         elif args.from_stage == "eval":
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", args.upstream_train,
-                                                         "--upstream-distill", args.upstream_distill])
+                                                         "--upstream-distill", args.upstream_distill,
+                                                         "--upstream-scicode", args.upstream_scicode])
             ids["convert_gguf"] = run_stage(
                 "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", args.upstream_train])
         else:

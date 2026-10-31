@@ -81,6 +81,8 @@ def main() -> None:
     ap.add_argument("--humaneval-n", type=int, default=0, help="0 = all 164 problems")
     ap.add_argument("--adherence-n", type=int, default=64)
     ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
+    ap.add_argument("--scicode-dir", type=str, default="scicode_test")
     args = ap.parse_args()
 
     run = cml.get_run_logger("eval", vars(args), task_type="testing")
@@ -197,8 +199,153 @@ def main() -> None:
             run.report_sample(f"task: {dp}\n\nstudent actions:\n{out[:1200]}",
                               step=2 + i, label=f"demo_{i}")
 
+    # ---- SciCode test split (standard setup: no background, carry over the
+    # model's own generated code for previous sub-steps) -----------------------
+    if args.scicode_task:
+        run_scicode_eval(args, run, llm, tok, lora_req)
+
     if run:
         run.finish()
+
+
+def _h5_targets(h5_path):
+    """step_id -> list of per-test target payloads (mirrors SciCode's
+    process_hdf5_to_tuple: single var -> value; multiple vars -> tuple)."""
+    import h5py
+
+    out = {}
+    with h5py.File(h5_path, "r") as f:
+        for step_id in f.keys():
+            group = f[step_id]
+            tests = []
+            for i in sorted(int(k[4:]) for k in group.keys()):
+                tg = group[f"test{i}"]
+                keys = list(tg.keys())
+                if len(keys) == 1:
+                    tests.append(tg[keys[0]][()])
+                else:
+                    tests.append(tuple(tg[k][()] for k in keys))
+            out[step_id] = tests
+    return out
+
+
+def _extract_code(text):
+    """Pull the Python implementation out of a generation."""
+    text = strip_think(text)
+    if "```" in text:
+        blocks = [b for b in text.split("```") if b.strip()]
+        if blocks:
+            inner = blocks[0].split("\n", 1)[-1] \
+                if blocks[0].lstrip().lower().startswith("python") else blocks[0]
+            text = inner
+    return text.strip()
+
+
+def run_scicode_eval(args, run, llm, tok, lora_req):
+    import shutil
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not os.path.isdir(args.scicode_dir):
+        local = cml.download_artifact(args.scicode_task, "scicode-test")
+        os.makedirs(args.scicode_dir, exist_ok=True)
+        for f in os.listdir(local):
+            shutil.copy(os.path.join(local, f), args.scicode_dir)
+    test_jsonl = os.path.join(args.scicode_dir, "problems_test.jsonl")
+    h5_path = os.path.join(args.scicode_dir, "test_data.h5")
+    problems = [json.loads(l) for l in open(test_jsonl) if l.strip()]
+    targets = _h5_targets(h5_path)
+    print(f"SciCode eval: {len(problems)} test problems, "
+          f"{sum(len(p['sub_steps']) for p in problems)} sub-steps")
+
+    sp = llm.get_default_sampling_params()
+    sp.temperature = 0.0
+    sp.max_tokens = 768
+
+    # generate step-by-step per problem (batch across problems per step index)
+    generated = {}  # (problem_id, step_idx) -> code
+    max_steps = max(len(p["sub_steps"]) for p in problems)
+    for step_idx in range(max_steps):
+        batch, keys = [], []
+        for p in problems:
+            if step_idx >= len(p["sub_steps"]):
+                continue
+            ss = p["sub_steps"][step_idx]
+            prev = "\n\n".join(
+                generated[(p["problem_id"], j)] for j in range(step_idx))
+            user = prompts.SCICODE_USER_TEMPLATE.format(
+                problem_description=p["problem_description_main"],
+                dependencies=p.get("required_dependencies", ""),
+                step_description=ss["step_description_prompt"],
+                function_header=ss["function_header"],
+            )
+            if prev:
+                user += f"\n\nSolutions to previous sub-steps:\n{prev}"
+            batch.append(chat(tok, [{"role": "system",
+                                     "content": prompts.SCICODE_SYSTEM_PROMPT},
+                                    {"role": "user", "content": user}]))
+            keys.append((p["problem_id"], step_idx))
+        outs = llm.generate(batch, sp, lora_request=lora_req)
+        for k, out in zip(keys, outs):
+            generated[k] = _extract_code(out.outputs[0].text)
+        print(f"  generated sub-step column {step_idx + 1}/{max_steps} "
+              f"({len(keys)} problems)")
+
+    # execute each sub-step against its h5-backed test cases
+    def check_one(item):
+        p, step_idx = item
+        ss = p["sub_steps"][step_idx]
+        step_id = ss["step_number"]
+        code = p.get("required_dependencies", "") + "\n"
+        for j in range(step_idx + 1):
+            code += generated[(p["problem_id"], j)] + "\n"
+        tests = ss["test_cases"]
+        tvals = targets.get(step_id, [])
+        script = code + "\ntargets = " + repr(tvals) + "\n"
+        for i, t in enumerate(tests):
+            script += f"\ntarget = targets[{i}]\n" + t + "\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+            f.write(script)
+            path = f.name
+        try:
+            r = subprocess.run([sys.executable, path], capture_output=True,
+                               timeout=120)
+            return (p["problem_id"], step_idx, r.returncode == 0,
+                    (r.stderr or "").strip().splitlines()[-1][:120]
+                    if r.returncode else "")
+        except subprocess.TimeoutExpired:
+            return (p["problem_id"], step_idx, False, "timeout")
+        finally:
+            os.unlink(path)
+
+    items = [(p, j) for p in problems for j in range(len(p["sub_steps"]))]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(check_one, items))
+
+    step_pass = {(pid, j): ok for pid, j, ok, _ in results}
+    n_sub = len(results)
+    n_sub_pass = sum(1 for _, _, ok, _ in results if ok)
+    main_pass = sum(
+        1 for p in problems
+        if all(step_pass.get((p["problem_id"], j), False)
+               for j in range(len(p["sub_steps"]))))
+    print(f"SciCode sub-step pass@1: {n_sub_pass}/{n_sub} = {n_sub_pass / n_sub:.3f}")
+    print(f"SciCode main-problem resolved: {main_pass}/{len(problems)} "
+          f"= {main_pass / len(problems):.3f}")
+    if run:
+        run.log({"eval/scicode_sub_pass1": n_sub_pass / n_sub,
+                 "eval/scicode_sub_passed": n_sub_pass, "eval/scicode_sub_total": n_sub,
+                 "eval/scicode_main_resolved": main_pass,
+                 "eval/scicode_main_total": len(problems),
+                 "eval/scicode_main_pass1": main_pass / len(problems)}, step=3)
+        fails = [r for r in results if not r[2]][:2]
+        for pid, j, _, err in fails:
+            p = next(pp for pp in problems if pp["problem_id"] == pid)
+            if run:
+                run.report_sample(
+                    f"FAILED scicode {pid}.{j + 1} ({p['problem_name']}): {err}\n\n"
+                    f"generated:\n{generated[(pid, j)][:1200]}",
+                    step=3, label=f"scicode_fail_{pid}_{j}")
 
 
 if __name__ == "__main__":

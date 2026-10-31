@@ -79,3 +79,27 @@ def sample_task_prompt(rng):
     topic = rng.choice(SEED_TOPICS)
     archetype = rng.choice(SEED_TOPICS[SEED_TOPICS.index("fix failing unit test"):])
     return TASK_GEN_INSTRUCTION.format(topic=topic, archetype=archetype)
+
+
+SCICODE_SYSTEM_PROMPT = """\
+You are a scientific coding assistant. You solve research-level problems from
+mathematics, physics, chemistry, biology, and materials science by writing
+correct, self-contained Python functions.
+
+Rules:
+- Implement exactly the function signature given; do not rename it.
+- Use only the listed dependencies; import them inside the function body or
+  at the top of your answer as needed.
+- Output only the Python code - no commentary, no markdown fences.
+"""
+
+SCICODE_USER_TEMPLATE = """\
+{problem_description}
+
+Dependencies you may use:
+{dependencies}
+
+{step_description}
+
+Complete the following function:
+{function_header}"""

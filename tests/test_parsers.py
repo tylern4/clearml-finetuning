@@ -7,9 +7,11 @@ from clearml_finetuning import data  # noqa: E402
 TRAJ = """Here are the actions:
 ```jsonl
 {"action": "run_cmd", "cmd": "ls tests"}
+{"observation": "a.py  b.py  test_a.py"}
 {"action": "edit_file", "path": "a.py", "old": "x = 1", "new": "x = 2"}
-{"action": "read_file", "path": "a.py"}
+{"observation": "edited a.py"}
 {"action": "run_cmd", "cmd": "pytest -x"}
+{"observation": "1 passed"}
 {"action": "finish", "summary": "fixed and verified"}
 ```
 <|im_end|>"""
@@ -21,9 +23,10 @@ TASK = """Sure! Here is a task:
 ```
 """
 
-acts = data.validate_actions(TRAJ)
-assert acts is not None, "trajectory parse failed"
-assert len(acts) == 5, f"expected 5 actions, got {len(acts)}"
+segs = data.validate_transcript(TRAJ)
+assert segs is not None, "trajectory parse failed"
+acts = [s["data"] for s in segs if s["kind"] == "action"]
+assert len(acts) == 4, f"expected 4 actions, got {len(acts)}"
 assert acts[-1]["action"] == "finish"
 print(f"trajectory: OK ({len(acts)} actions)")
 
@@ -33,7 +36,7 @@ assert cleaned, "task parse failed"
 print(f"task: OK (title={cleaned['title']!r})")
 
 # degenerate cases must NOT pass
-assert data.validate_actions("no actions here") is None
-assert data.validate_actions('{"action": "finish"}') is None
+assert data.validate_transcript("no actions here") is None
+assert data.validate_transcript('{"action": "finish"}') is None
 assert data.validate_task_obj({"title": "x"}) is None
 print("negatives: OK")

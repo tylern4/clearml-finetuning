@@ -28,6 +28,8 @@ def main() -> None:
                     "Qwen/Qwen3.5-9B"))
     ap.add_argument("--data-task", type=str, default="", help="upstream distill task id")
     ap.add_argument("--data-dir", type=str, default="distilled", help="local data dir if already present")
+    ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
+    ap.add_argument("--scicode-dir", type=str, default="scicode", help="local scicode dir if present")
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -70,8 +72,26 @@ def main() -> None:
 
     rows = data.read_jsonl(os.path.join(args.data_dir, "train.jsonl"))
     sft_rows = [r["messages"] for r in data.build_sft_rows(rows, prompts.AGENT_SYSTEM_PROMPT)]
+
+    # ---- optional SciCode mix-in (multi-task: agent scaffold + science code) --
+    n_scicode = 0
+    scicode_train = os.path.join(args.scicode_dir, "scicode_train.jsonl")
+    if args.scicode_task and not os.path.exists(scicode_train):
+        import shutil
+        local = cml.download_artifact(args.scicode_task, "scicode-data")
+        os.makedirs(args.scicode_dir, exist_ok=True)
+        if os.path.isdir(local):
+            for f in os.listdir(local):
+                shutil.copy(os.path.join(local, f), args.scicode_dir)
+        else:
+            shutil.copy(local, scicode_train)
+    if os.path.exists(scicode_train):
+        scicode_rows = data.read_jsonl(scicode_train)
+        sft_rows += [r["messages"] for r in scicode_rows]
+        n_scicode = len(scicode_rows)
     if master:
-        print(f"loaded {len(sft_rows)} training rows")
+        print(f"loaded {len(sft_rows)} training rows "
+              f"({len(sft_rows) - n_scicode} agent + {n_scicode} scicode)")
 
     # tokenize with assistant-only loss mask; fall back to masking the
     # assistant suffix if the chat template lacks generation markers
