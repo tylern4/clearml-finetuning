@@ -27,10 +27,10 @@ TERMINAL = {"completed", "failed", "stopped"}
 
 # per-stage venv isolation: vllm and peft stacks must not share a venv
 REQUIREMENTS = {
-    "distill": ["vllm>=0.11.0", "clearml>=2.1", "boto3", "matplotlib"],
+    "distill": ["vllm>=0.11.0", "ninja", "clearml>=2.1", "boto3", "matplotlib"],
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
               "clearml>=2.1", "boto3", "matplotlib"],
-    "eval": ["vllm>=0.11.0", "datasets>=3.0", "peft>=0.17",
+    "eval": ["vllm>=0.11.0", "ninja", "datasets>=3.0", "peft>=0.17",
              "clearml>=2.1", "boto3", "matplotlib"],
     "convert_gguf": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17",
                      "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3"],

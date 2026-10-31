@@ -110,6 +110,9 @@ def main() -> None:
 
     env = dict(os.environ)
     env["CLEARML_RUN"] = "1"
+    if stage in ("distill", "eval"):
+        # avoid the flashinfer JIT sampler (needs ninja + slow first-use compile)
+        env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     print(f"+ {' '.join(cmd)}")
     proc = subprocess.run(cmd, env=env)
     if proc.returncode != 0:
