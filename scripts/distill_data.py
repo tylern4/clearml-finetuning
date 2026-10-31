@@ -50,19 +50,14 @@ def main() -> None:
     sp_tasks = SamplingParams(temperature=args.temperature, top_p=0.95, max_tokens=400)
     outs = llm.generate([chat(p) for p in task_prompts], sp_tasks)
 
-    tasks, seen = [], set()
+    tasks, seen, rejects = [], set(), []
     for out in outs:
-        text = out.outputs[0].text.strip()
-        # best-effort JSON extraction (first {...} block)
-        a, b = text.find("{"), text.rfind("}")
-        if a < 0 or b <= a:
-            continue
-        try:
-            obj = json.loads(text[a:b + 1])
-        except json.JSONDecodeError:
-            continue
-        cleaned = data.validate_task_obj(obj)
+        text = out.outputs[0].text
+        obj = data.extract_json_object(text)
+        cleaned = data.validate_task_obj(obj) if obj else None
         if not cleaned:
+            if len(rejects) < 3:
+                rejects.append(text[:800])
             continue
         fp = data.task_fingerprint(cleaned)
         if fp in seen:
@@ -70,6 +65,10 @@ def main() -> None:
         seen.add(fp)
         cleaned["fingerprint"] = fp
         tasks.append(cleaned)
+    if run and rejects:
+        for i, r in enumerate(rejects):
+            run.report_sample(f"rejected task-invention output:\n{r}", step=0,
+                              label=f"reject_task_{i}")
 
     print(f"kept {len(tasks)}/{args.n_tasks} invented tasks after validation+dedup")
     if run:
@@ -83,12 +82,19 @@ def main() -> None:
     ]
     outs = llm.generate([chat(p) for p in traj_prompts], sp_traj)
 
-    rows = []
+    rows, traj_rejects = [], []
     for task, out in zip(tasks, outs):
-        actions = data.validate_actions(out.outputs[0].text)
+        text = out.outputs[0].text
+        actions = data.validate_actions(text)
         if not actions:
+            if len(traj_rejects) < 3:
+                traj_rejects.append(text[:900])
             continue
         rows.append({**task, "actions": actions})
+    if run and traj_rejects:
+        for i, r in enumerate(traj_rejects):
+            run.report_sample(f"rejected trajectory for '{tasks[i]['title']}':\n{r}",
+                              step=1, label=f"reject_traj_{i}")
 
     print(f"kept {len(rows)}/{len(tasks)} trajectories after validation")
     rng.shuffle(rows)

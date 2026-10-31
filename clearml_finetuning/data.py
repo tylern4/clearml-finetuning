@@ -17,28 +17,59 @@ def trajectory_to_messages(system_prompt, task_text, actions):
     ]
 
 
+def extract_json_object(text):
+    """Best-effort extraction of a JSON object from LLM output.
+
+    Handles prose around the object, fences, and stray stop tokens by slicing
+    from the first '{' to the last '}'.
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.replace("<|im_end|>", "").replace("<|im_start|>", "")
+    a, b = text.find("{"), text.rfind("}")
+    if a < 0 or b <= a:
+        return None
+    try:
+        return json.loads(text[a:b + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def extract_jsonl_actions(text):
+    """Extract JSONL action lines from LLM output.
+
+    Tolerates markdown fences and prose: only lines starting with '{' are
+    considered, which naturally skips fence markers and commentary.
+    """
+    if not isinstance(text, str):
+        return []
+    text = text.replace("<|im_end|>", "").replace("<|im_start|>", "")
+    return [line.strip() for line in text.splitlines() if line.strip().startswith("{")]
+
+
 def validate_task_obj(obj):
     """Return a cleaned task dict or None if the teacher output is unusable."""
     if not isinstance(obj, dict):
         return None
     title, ctx, task = obj.get("title"), obj.get("repo_context"), obj.get("task")
-    if not (isinstance(title, str) and isinstance(ctx, str) and isinstance(task, str)):
+    if not isinstance(title, str) or not isinstance(task, str):
         return None
-    if not (10 <= len(title) <= 120 and 20 <= len(ctx) <= 600 and 40 <= len(task) <= 1200):
+    ctx = ctx if isinstance(ctx, str) else ""
+    if not (10 <= len(title) <= 160 and len(ctx) <= 800 and 40 <= len(task) <= 1500):
         return None
     return {"title": title.strip(), "repo_context": ctx.strip(), "task": task.strip()}
 
 
 def validate_actions(obj):
     """Parse/validate a teacher trajectory; returns a list of action dicts or None."""
-    if not isinstance(obj, str):
+    if isinstance(obj, dict):  # already-parsed single action is not a trajectory
+        return None
+    lines = extract_jsonl_actions(obj)
+    if not lines:
         return None
     actions = []
     allowed = {"run_cmd", "read_file", "edit_file", "write_file", "finish"}
-    for line in obj.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines:
         try:
             a = json.loads(line)
         except json.JSONDecodeError:

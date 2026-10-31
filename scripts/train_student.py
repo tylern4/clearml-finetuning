@@ -99,6 +99,10 @@ def main() -> None:
         if len(ids) > args.max_len:
             ids, labels = ids[:args.max_len], labels[:args.max_len]
         examples.append((ids, labels))
+    if not examples:
+        raise RuntimeError(
+            f"no trainable rows after tokenization - check the distill stage "
+            f"output (data dir: {args.data_dir})")
     if master:
         lens = sorted(len(e[0]) for e in examples)
         print(f"tokenized: {len(examples)} rows, len p50={lens[len(lens)//2]} p95={lens[int(len(lens)*.95)]} max={lens[-1]}")
