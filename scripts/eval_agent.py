@@ -10,6 +10,7 @@ import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,34 @@ import gzip
 import urllib.request
 
 from clearml_finetuning import cml, data, prompts  # noqa: E402
+
+_THINK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think\b[^>]*>.*$", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think(text):
+    """Remove reasoning traces from model output (defensive)."""
+    if not isinstance(text, str):
+        return text
+    text = _THINK_RE.sub("", text)
+    return _THINK_OPEN_RE.sub("", text).strip()
+
+
+def chat(tok, messages):
+    """Chat-template with thinking DISABLED.
+
+    Qwen3.5's default template puts the model in thinking mode (the generation
+    prompt ends with an open think block). With a 512-token budget that burns
+    everything on reasoning and leaves no code, so eval must disable it
+    (same as the distill stage).
+    """
+    try:
+        return tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False)
+    except TypeError:
+        return tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
 
 
 def load_humaneval(attempts=3):
@@ -82,10 +111,8 @@ def main() -> None:
     problems = load_humaneval()
     problems = problems[:args.humaneval_n] if args.humaneval_n else problems
     prompts_ = [
-        tok.apply_chat_template(
-            [{"role": "user", "content": p["prompt"] +
-              "\n\nComplete the following function. Return only the code."}],
-            tokenize=False, add_generation_prompt=True)
+        chat(tok, [{"role": "user", "content": p["prompt"] +
+                    "\n\nComplete the following function. Return only the code."}])
         for p in problems
     ]
     sp = llm.get_default_sampling_params()
@@ -95,7 +122,7 @@ def main() -> None:
 
     passed = 0
     for p, out in zip(problems, outs):
-        code = out.outputs[0].text
+        code = strip_think(out.outputs[0].text)
         if "```" in code:
             blocks = [b for b in code.split("```") if b.strip()]
             code = blocks[0].split("\n", 1)[-1] if blocks else code
@@ -134,10 +161,8 @@ def main() -> None:
     rng = random.Random(0)
     sample = rng.sample(val_rows, min(args.adherence_n, len(val_rows))) if val_rows else []
     agent_prompts = [
-        tok.apply_chat_template(
-            [{"role": "system", "content": system_prompt},
-             {"role": "user", "content": f"{r['repo_context']}\n\nTask: {r['task']}"}],
-            tokenize=False, add_generation_prompt=True)
+        chat(tok, [{"role": "system", "content": system_prompt},
+                   {"role": "user", "content": f"{r['repo_context']}\n\nTask: {r['task']}"}])
         for r in sample
     ]
     sp2 = llm.get_default_sampling_params()
@@ -147,7 +172,7 @@ def main() -> None:
 
     valid = 0
     for row, out in zip(sample, outs2):
-        text = out.outputs[0].text
+        text = strip_think(out.outputs[0].text)
         if data.validate_transcript(text) is not None:
             valid += 1
         elif run:
@@ -165,11 +190,9 @@ def main() -> None:
         "Add a unit test for the retry helper in client/retry.py.",
     ]
     for i, dp in enumerate(demo_prompts):
-        ptext = tok.apply_chat_template(
-            [{"role": "system", "content": system_prompt},
-             {"role": "user", "content": dp}],
-            tokenize=False, add_generation_prompt=True)
-        out = llm.generate([ptext], sp2, lora_request=lora_req)[0].outputs[0].text
+        ptext = chat(tok, [{"role": "system", "content": system_prompt},
+                           {"role": "user", "content": dp}])
+        out = strip_think(llm.generate([ptext], sp2, lora_request=lora_req)[0].outputs[0].text)
         if run:
             run.report_sample(f"task: {dp}\n\nstudent actions:\n{out[:1200]}",
                               step=2 + i, label=f"demo_{i}")
