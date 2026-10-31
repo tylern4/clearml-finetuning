@@ -16,7 +16,25 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import gzip
+import urllib.request
+
 from clearml_finetuning import cml, data, prompts  # noqa: E402
+
+
+def load_humaneval(attempts=3):
+    """Fetch HumanEval directly (avoids the datasets/hub version matrix)."""
+    url = "https://raw.githubusercontent.com/openai/human-eval/main/data/HumanEval.jsonl.gz"
+    last = None
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                blob = gzip.decompress(r.read())
+            return [json.loads(l) for l in blob.decode().splitlines() if l.strip()]
+        except Exception as e:
+            last = e
+            print(f"HumanEval download failed ({e}); retry {i + 1}/{attempts}")
+    raise last
 
 
 def main() -> None:
@@ -57,10 +75,8 @@ def main() -> None:
     lora_req = LoRARequest("student", 1, args.adapter_dir) if use_lora else None
 
     # ---- HumanEval pass@1 (with adapter if present) --------------------------
-    from datasets import load_dataset
-
-    ds = load_dataset("openai_humaneval", split="test")
-    problems = list(ds)[:args.humaneval_n] if args.humaneval_n else list(ds)
+    problems = load_humaneval()
+    problems = problems[:args.humaneval_n] if args.humaneval_n else problems
     prompts_ = [
         tok.apply_chat_template(
             [{"role": "user", "content": p["prompt"] +
