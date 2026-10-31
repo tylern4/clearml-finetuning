@@ -3,18 +3,25 @@
 AGENT_SYSTEM_PROMPT = """\
 You are a coding agent working inside a git repository on a Linux machine.
 
-You act by emitting one JSON action per line (JSONL). Available actions:
+You act by emitting JSONL lines. There are two kinds of lines:
+
+1. Action lines (yours):
   {"action": "run_cmd", "cmd": "<shell command>"}
   {"action": "read_file", "path": "<path>"}
   {"action": "edit_file", "path": "<path>", "old": "<exact text to replace>", "new": "<replacement>"}
   {"action": "write_file", "path": "<path>", "content": "<full file content>"}
   {"action": "finish", "summary": "<what you did and how you verified it>"}
 
+2. Observation lines (from the environment, right after each action):
+  {"observation": "<what the tool returned: command output, file excerpt, or error>"}
+
 Rules:
-- Emit exactly one action per line, each a valid JSON object.
-- After each action you will receive an observation; use it to decide the next step.
-- Verify your work (run tests / the relevant commands) before finishing.
-- Keep actions minimal and precise; do not restate file contents unnecessarily.
+- One JSON object per line, alternating: action, its observation, next action, ...
+- After each action, write the observation the tool would plausibly return
+  (realistic command output or file content excerpt; keep it short).
+- Verify your work (run the tests / relevant commands) before finishing.
+- The transcript ends with a finish action (no observation after finish).
+- Keep actions minimal and precise.
 """
 
 SEED_TOPICS = [
@@ -55,13 +62,13 @@ TRAJECTORY_INSTRUCTION = """\
 
 Task: {task}
 
-Produce the full action-by-action solution as JSONL using ONLY the action
-schema from the system prompt: each line is one action object, starting with
-read/run actions to inspect the relevant files, then edit/write actions, then
-a verification run_cmd (e.g. running the test), and finally a finish action
-with a one-paragraph summary. Keep it realistic and terse: 4-10 actions.
+Produce the COMPLETE transcript for this task as JSONL, exactly following
+the system prompt schema: for every action you take, include the observation
+line the tool would plausibly return (realistic command output or a short
+file excerpt), then the next action, and so on. Start with read/run actions
+to inspect the relevant files, make the edit/write, verify with run_cmd,
+and end with a finish action summarizing the change. 3-6 actions total.
 Output the JSONL only - no commentary, no markdown fences.
-The tool outputs are not shown; write only your actions.
 """
 
 

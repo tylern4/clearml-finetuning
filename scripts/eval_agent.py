@@ -128,10 +128,10 @@ def main() -> None:
     valid = 0
     for row, out in zip(sample, outs2):
         text = out.outputs[0].text
-        if data.validate_actions(text) is not None:
+        if data.validate_transcript(text) is not None:
             valid += 1
         elif run:
-            run.report_sample(f"invalid trajectory for '{row['title']}':\n{text[:900]}",
+            run.report_sample(f"invalid transcript for '{row['title']}':\n{text[:900]}",
                               step=1, label=f"invalid_{row['fingerprint']}")
     frac = valid / max(1, len(sample))
     print(f"trajectory adherence: {valid}/{len(sample)} = {frac:.3f}")

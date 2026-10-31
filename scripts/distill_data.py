@@ -83,7 +83,7 @@ def main() -> None:
         run.log({"distill/tasks_invented": args.n_tasks, "distill/tasks_kept": len(tasks)}, step=0)
 
     # ---- pass 2: generate trajectories --------------------------------------
-    sp_traj = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=1400)
+    sp_traj = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=2400)
     traj_prompts = [
         [{"role": "system", "content": prompts.AGENT_SYSTEM_PROMPT},
          {"role": "user", "content": prompts.TRAJECTORY_INSTRUCTION.format(
@@ -95,12 +95,12 @@ def main() -> None:
     rows, traj_rejects = [], []
     for task, out in zip(tasks, outs):
         text = out.outputs[0].text
-        actions = data.validate_actions(text)
-        if not actions:
+        transcript = data.validate_transcript(text)
+        if not transcript:
             if len(traj_rejects) < 3:
                 traj_rejects.append(text[:900])
             continue
-        rows.append({**task, "actions": actions})
+        rows.append({**task, "transcript": transcript})
     if run and traj_rejects:
         for i, r in enumerate(traj_rejects):
             run.report_sample(f"rejected trajectory for '{tasks[i]['title']}':\n{r}",

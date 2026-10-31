@@ -72,32 +72,54 @@ def validate_task_obj(obj):
     return {"title": title.strip(), "repo_context": ctx.strip(), "task": task.strip()}
 
 
-def validate_actions(obj):
-    """Parse/validate a teacher trajectory; returns a list of action dicts or None."""
-    if isinstance(obj, dict):  # already-parsed single action is not a trajectory
-        return None
+ACTION_KEYS = {"run_cmd", "read_file", "edit_file", "write_file", "finish"}
+
+
+def validate_transcript(obj):
+    """Validate an interleaved action/observation transcript.
+
+    Returns a list of segments: {"kind": "action"|"observation", ...} or None.
+    Must start with an action, end with a finish action, contain >= 3 actions
+    including at least one edit/write and one run_cmd.
+    """
     lines = extract_jsonl_actions(obj)
     if not lines:
         return None
-    actions = []
-    allowed = {"run_cmd", "read_file", "edit_file", "write_file", "finish"}
+    segments = []
+    n_actions = 0
     for line in lines:
         try:
-            a = json.loads(line)
+            obj_line = json.loads(line)
         except json.JSONDecodeError:
             return None
-        if not isinstance(a, dict) or a.get("action") not in allowed:
+        if not isinstance(obj_line, dict):
             return None
-        actions.append(a)
-    if not (4 <= len(actions) <= 14):
+        if "action" in obj_line:
+            if obj_line["action"] not in ACTION_KEYS:
+                return None
+            segments.append({"kind": "action", "data": obj_line})
+            n_actions += 1
+        elif "observation" in obj_line:
+            obs = obj_line["observation"]
+            if not isinstance(obs, str) or not (1 <= len(obs) <= 2000):
+                return None
+            # observations must follow an action (never start the transcript)
+            if not segments or segments[-1]["kind"] != "action":
+                return None
+            segments.append({"kind": "observation", "text": obs})
+        else:
+            return None
+    if not (3 <= n_actions <= 8):
         return None
-    if actions[-1].get("action") != "finish":
+    if not segments or segments[-1]["kind"] != "action" \
+            or segments[-1]["data"]["action"] != "finish":
         return None
-    if not any(a["action"] in ("edit_file", "write_file") for a in actions):
+    kinds = [s_["data"]["action"] for s_ in segments if s_["kind"] == "action"]
+    if "edit_file" not in kinds and "write_file" not in kinds:
         return None
-    if not any(a["action"] == "run_cmd" for a in actions):
+    if "run_cmd" not in kinds:
         return None
-    return actions
+    return segments
 
 
 def task_fingerprint(task_obj):
@@ -124,12 +146,27 @@ def read_jsonl(path):
 
 
 def build_sft_rows(rows, system_prompt):
-    """Convert distilled rows into chat-message training rows."""
+    """Convert distilled transcript rows into multi-turn chat training rows.
+
+    Actions become assistant turns; simulated observations become user turns
+    (they are environment output and get masked by assistant-only loss).
+    """
+    import json as _json
+
     out = []
     for row in rows:
         task_text = f"{row['repo_context']}\n\nTask: {row['task']}"
+        messages = [{"role": "system", "content": system_prompt},
+                    {"role": "user", "content": task_text}]
+        for seg in row["transcript"]:
+            if seg["kind"] == "action":
+                messages.append({"role": "assistant",
+                                 "content": _json.dumps(seg["data"], ensure_ascii=False)})
+            else:
+                messages.append({"role": "user",
+                                 "content": f"Observation:\n{seg['text']}"})
         out.append({
-            "messages": trajectory_to_messages(system_prompt, task_text, row["actions"]),
+            "messages": messages,
             "meta": {"title": row["title"], "fingerprint": row["fingerprint"]},
         })
     return out
