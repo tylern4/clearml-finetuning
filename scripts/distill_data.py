@@ -107,19 +107,50 @@ def main() -> None:
     ]
     outs = llm.generate([chat(m) for m in traj_prompts], sp_traj)
 
-    rows, traj_rejects = [], []
+    rows, traj_rejects, pending = [], [], []
     for task, out in zip(tasks, outs):
         text = out.outputs[0].text
         transcript = data.validate_transcript(text)
-        if not transcript:
+        if transcript:
+            rows.append({**task, "transcript": transcript})
+        else:
+            pending.append((task, text))
             if len(traj_rejects) < 3:
                 traj_rejects.append(text[:900])
-            continue
-        rows.append({**task, "transcript": transcript})
+    print(f"pass 2 initial: kept {len(rows)}/{len(tasks)}, {len(pending)} rejected -> repair")
     if run and traj_rejects:
         for i, r in enumerate(traj_rejects):
-            run.report_sample(f"rejected trajectory for '{tasks[i]['title']}':\n{r}",
-                              step=1, label=f"reject_traj_{i}")
+            run.report_sample(f"rejected trajectory (initial):\n{r}", step=1,
+                              label=f"reject_traj_{i}")
+
+    # ---- pass 2b: repair rounds on rejected trajectories --------------------
+    for rnd in range(2):
+        if not pending:
+            break
+        before = len(rows)
+        repair_prompts = [
+            [{"role": "system", "content": prompts.AGENT_SYSTEM_PROMPT},
+             {"role": "user", "content": prompts.REPAIR_INSTRUCTION.format(
+                 repo_context=t["repo_context"], task=t["task"],
+                 broken=bt[:3000])}]
+            for t, bt in pending
+        ]
+        outs = llm.generate([chat(m) for m in repair_prompts], sp_traj)
+        still = []
+        for (task, bt), out in zip(pending, outs):
+            text = out.outputs[0].text
+            transcript = data.validate_transcript(text)
+            if transcript:
+                rows.append({**task, "transcript": transcript})
+            else:
+                still.append((task, text))
+        pending = still
+        print(f"repair round {rnd + 1}: recovered {len(rows) - before}, "
+              f"{len(pending)} still rejected (total kept {len(rows)})")
+    if run and pending and len(pending) <= 3:
+        for i, (t, bt) in enumerate(pending):
+            run.report_sample(f"rejected trajectory (after repair) '{t['title']}':\n{bt[:900]}",
+                              step=1, label=f"reject_traj_final_{i}")
 
     print(f"kept {len(rows)}/{len(tasks)} trajectories after validation")
     rng.shuffle(rows)
@@ -133,6 +164,7 @@ def main() -> None:
     if run:
         run.log({
             "distill/trajectories_kept": len(rows),
+            "distill/trajectories_rejected_final": len(pending),
             "distill/train_rows": len(train),
             "distill/val_rows": len(val),
         }, step=1)

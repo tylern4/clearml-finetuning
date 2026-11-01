@@ -168,3 +168,33 @@ Dependencies you may use:
 
 Complete the following function:
 {function_header}"""
+
+
+REPAIR_INSTRUCTION = """\
+{repo_context}
+
+Task: {task}
+
+Your previous transcript for this task was rejected because it did not follow
+the required JSONL schema. Here is what you produced:
+
+---BEGIN BROKEN TRANSCRIPT---
+{broken}
+---END BROKEN TRANSCRIPT---
+
+Rewrite it as a CORRECT transcript, JSONL only, obeying ALL of these rules:
+- One JSON object per line, strictly alternating: action, observation, action, ...
+- Action lines use exactly one of these forms:
+  {{"action": "run_cmd", "cmd": "<shell command>"}}
+  {{"action": "read_file", "path": "<path>"}}
+  {{"action": "edit_file", "path": "<path>", "old": "<exact text>", "new": "<replacement>"}}
+  {{"action": "write_file", "path": "<path>", "content": "<full file content>"}}
+  {{"action": "finish", "summary": "<what you did and how you verified>"}}
+- Every action except the final finish MUST be immediately followed by an
+  observation line: {{"observation": "<short realistic tool output, 1-2000 chars>"}}
+- The transcript MUST start with an action (never an observation).
+- 3 to 8 actions total.
+- MUST end with a finish action (no observation after finish).
+- MUST include at least one edit_file or write_file AND at least one run_cmd.
+Output the corrected JSONL only - no commentary, no markdown fences.
+"""
