@@ -101,7 +101,7 @@ def main() -> None:
     llm = LLM(
         model=args.student,
         tensor_parallel_size=max(1, min(nproc, 4)),
-        max_model_len=8192,
+        max_model_len=32768,
         enable_lora=use_lora,
         max_lora_rank=64 if use_lora else None,
         gpu_memory_utilization=0.90,
@@ -322,6 +322,8 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
             ss = p["sub_steps"][step_idx]
             prev = "\n\n".join(
                 generated[(p["problem_id"], j)] for j in range(step_idx))
+            if len(prev) > 12000:  # keep the most recent context, bound prompt size
+                prev = "...\n\n" + prev[-12000:]
             user = prompts.SCICODE_USER_TEMPLATE.format(
                 problem_description=p["problem_description_main"],
                 dependencies=p.get("required_dependencies", ""),
