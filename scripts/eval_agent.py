@@ -208,9 +208,52 @@ def main() -> None:
         run.finish()
 
 
+def _h5_sparse_matrix(group):
+    """Rebuild a scipy sparse matrix from its h5 group (official layout)."""
+    import scipy.sparse
+
+    data = group["data"][()]
+    shape = tuple(group["shape"][()])
+    if "row" in group and "col" in group:
+        return scipy.sparse.coo_matrix(
+            (data, (group["row"][()], group["col"][()])), shape=shape)
+    if "blocksize" in group:
+        return scipy.sparse.bsr_matrix(
+            (data, group["indices"][()], group["indptr"][()]),
+            shape=shape, blocksize=tuple(group["blocksize"][()]))
+    return scipy.sparse.csr_matrix(
+        (data, group["indices"][()], group["indptr"][()]), shape=shape)
+
+
+def _h5_datagroup(group):
+    """varN group -> list / sparse matrix / dict, per the official harness."""
+    import h5py
+
+    for key in group.keys():
+        if key == "list":
+            return [group[key][k][()] for k in group[key].keys()]
+        if key == "sparse_matrix":
+            return _h5_sparse_matrix(group[key])
+        # otherwise a dict (keys may be float-parseable -> convert to float)
+        out = {}
+        for k, obj in group.items():
+            if isinstance(obj, h5py.Group):
+                out[k] = _h5_sparse_matrix(obj["sparse_matrix"])
+            elif isinstance(obj[()], bytes):
+                out[k] = obj[()].decode("utf-8", errors="strict")
+            else:
+                try:
+                    out[float(k)] = obj[()]
+                except ValueError:
+                    out[k] = obj[()]
+        return out
+    return None
+
+
 def _h5_targets(h5_path):
-    """step_id -> list of per-test target payloads (mirrors SciCode's
-    process_hdf5_to_tuple: single var -> value; multiple vars -> tuple)."""
+    """step_id -> list of per-test target payloads. Faithful port of SciCode's
+    process_hdf5_to_tuple: single var -> value (decoded if bytes); multiple
+    vars -> tuple; nested var groups -> list / sparse matrix / dict."""
     import h5py
 
     out = {}
@@ -221,10 +264,16 @@ def _h5_targets(h5_path):
             for i in sorted(int(k[4:]) for k in group.keys()):
                 tg = group[f"test{i}"]
                 keys = list(tg.keys())
-                if len(keys) == 1:
-                    tests.append(tg[keys[0]][()])
-                else:
-                    tests.append(tuple(tg[k][()] for k in keys))
+                vals = []
+                for k in keys:
+                    sub = tg[k]
+                    if isinstance(sub, h5py.Dataset):
+                        v = sub[()]
+                        vals.append(v.decode("utf-8", errors="strict")
+                                    if isinstance(v, bytes) else v)
+                    else:
+                        vals.append(_h5_datagroup(sub))
+                tests.append(vals[0] if len(vals) == 1 else tuple(vals))
             out[step_id] = tests
     return out
 
@@ -301,7 +350,11 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
             code += generated[(p["problem_id"], j)] + "\n"
         tests = ss["test_cases"]
         tvals = targets.get(step_id, [])
-        script = code + "\ntargets = " + repr(tvals) + "\n"
+        import base64
+        import pickle
+        blob = base64.b64encode(pickle.dumps(tvals)).decode("ascii")
+        script = (code + "\nimport base64, pickle\n"
+                  f"targets = pickle.loads(base64.b64decode({blob!r}))\n")
         for i, t in enumerate(tests):
             script += f"\ntarget = targets[{i}]\n" + t + "\n"
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
