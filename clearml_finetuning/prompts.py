@@ -81,6 +81,71 @@ def sample_task_prompt(rng):
     return TASK_GEN_INSTRUCTION.format(topic=topic, archetype=archetype)
 
 
+# SciCode-style variation: the teacher invents NEW research-level scientific
+# coding problems (in SciCode's domains) and then produces agent trajectories
+# on them. These are fresh problems, NOT the SciCode test split, so there is
+# no evaluation contamination.
+SCICODE_DOMAINS = [
+    "numerical linear algebra (matrix decompositions, eigenvalues, linear solves)",
+    "ordinary/partial differential equations (integrators, solvers)",
+    "numerical integration and quadrature",
+    "optimization and root finding",
+    "probability and statistics (sampling, distributions, Monte Carlo)",
+    "signal processing (FFT, filtering, spectral analysis)",
+    "classical mechanics and molecular dynamics",
+    "electromagnetism and electrostatics (field solvers)",
+    "quantum mechanics (Schrodinger equation, tight-binding, Hartree-Fock)",
+    "statistical mechanics and Ising/Potts models",
+    "quantum chemistry (basis sets, integrals, SCF)",
+    "condensed matter physics (band structure, phonons)",
+    "thermodynamics and phase transitions",
+    "chemical kinetics and reaction networks",
+    "bioinformatics (sequence alignment, phylogenetics)",
+    "materials science (lattice structures, elastic constants)",
+    "astrophysics (N-body, orbital mechanics, radiative transfer)",
+    "fluid dynamics (Navier-Stokes, lattice Boltzmann)",
+]
+
+SCICODE_TASK_GEN_INSTRUCTION = """\
+Invent a realistic, self-contained scientific computing task suitable for a
+research code base. Do NOT copy any existing benchmark problem.
+
+Scientific domain: {domain}
+Problem archetype: {archetype}
+
+The task should require writing or fixing a small Python function (or a few
+functions) using scientific libraries (numpy/scipy/sympy/etc.).
+
+Return ONLY a JSON object with keys:
+  "title": short task title
+  "repo_context": 1-2 sentences describing the (fictional) research repo and
+                  the relevant module/file names
+  "task": the task description as a researcher would write it (2-5 sentences,
+          concrete, naming the file, the function signature to implement, and
+          the expected numerical behavior / units / tolerances)
+The task must be solvable with a handful of file edits and shell commands
+(e.g. running a small check script with numpy).
+"""
+
+SCICODE_ARCHETYPES = [
+    "implement a missing numerical function from its spec and docstring",
+    "fix an incorrect result caused by a wrong formula or sign",
+    "fix a numerical instability (overflow, divide-by-zero, poor conditioning)",
+    "add a convergence/accuracy check and a unit test with tolerances",
+    "vectorize a slow pure-Python loop with numpy",
+    "fix an off-by-one / indexing bug in an array computation",
+    "implement a boundary or initial condition that is currently wrong",
+    "add input validation for physical parameters (negative mass, etc.)",
+]
+
+
+def sample_scicode_task_prompt(rng):
+    """Build a SciCode-style scientific-task generation prompt."""
+    domain = rng.choice(SCICODE_DOMAINS)
+    archetype = rng.choice(SCICODE_ARCHETYPES)
+    return SCICODE_TASK_GEN_INSTRUCTION.format(domain=domain, archetype=archetype)
+
+
 SCICODE_SYSTEM_PROMPT = """\
 You are a scientific coding assistant. You solve research-level problems from
 mathematics, physics, chemistry, biology, and materials science by writing

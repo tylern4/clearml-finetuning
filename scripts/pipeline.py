@@ -121,13 +121,15 @@ def main() -> int:
     ap.add_argument("--upstream-train", default="")
     ap.add_argument("--upstream-scicode", default="")
     ap.add_argument("--all", action="store_true")
+    ap.add_argument("--epochs", type=int, default=20,
+                    help="training epochs passed to the train stage")
     args = ap.parse_args()
 
     t0 = time.time()
     ids = {}
     distill_args = ["--stage", "distill"]
     scicode_args = ["--stage", "scicode_data"]
-    train_args = ["--stage", "train"]
+    train_args = ["--stage", "train", "--epochs", str(args.epochs)]
     eval_args = ["--stage", "eval"]
 
     if args.only:

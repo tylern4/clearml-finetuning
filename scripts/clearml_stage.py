@@ -34,7 +34,7 @@ def main() -> None:
     ap.add_argument("--student", type=str, default=os.environ.get(
         "CML_STUDENT", "Qwen/Qwen3.5-9B"))
     ap.add_argument("--n-tasks", type=int, default=1200)
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--humaneval-n", type=int, default=0)
     args, _ = ap.parse_known_args()

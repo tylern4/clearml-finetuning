@@ -34,7 +34,7 @@ def main() -> None:
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=20)
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--device-batch-size", type=int, default=1,
                     help="9B bf16 + LoRA on 40GB A100s: keep at 1")
     ap.add_argument("--grad-accum", type=int, default=8)

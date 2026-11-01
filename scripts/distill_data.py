@@ -21,6 +21,8 @@ def main() -> None:
     ap.add_argument("--teacher", default=os.environ.get("CML_TEACHER",
                     "Qwen/Qwen3.8-27B"))
     ap.add_argument("--n-tasks", type=int, default=1200, help="task inventions to attempt")
+    ap.add_argument("--scicode-frac", type=float, default=0.25,
+                    help="fraction of task prompts that are SciCode-style scientific problems")
     ap.add_argument("--max-model-len", type=int, default=8192)
     ap.add_argument("--temperature", type=float, default=0.9)
     ap.add_argument("--val-fraction", type=float, default=0.02)
@@ -54,12 +56,20 @@ def main() -> None:
     rng = random.Random(args.seed)
 
     # ---- pass 1: invent tasks ------------------------------------------------
-    task_prompts = [prompts.sample_task_prompt(rng) for _ in range(args.n_tasks)]
+    n_scicode = int(round(args.n_tasks * args.scicode_frac))
+    task_prompts, task_kinds = [], []
+    for i in range(args.n_tasks):
+        if i < n_scicode:
+            task_prompts.append(prompts.sample_scicode_task_prompt(rng))
+            task_kinds.append("scicode")
+        else:
+            task_prompts.append(prompts.sample_task_prompt(rng))
+            task_kinds.append("agent")
     sp_tasks = SamplingParams(temperature=args.temperature, top_p=0.95, max_tokens=400)
     outs = llm.generate([chat([{"role": "user", "content": p}]) for p in task_prompts], sp_tasks)
 
     tasks, seen, rejects = [], set(), []
-    for out in outs:
+    for out, kind in zip(outs, task_kinds):
         text = out.outputs[0].text
         obj = data.extract_json_object(text)
         cleaned = data.validate_task_obj(obj) if obj else None
@@ -72,15 +82,20 @@ def main() -> None:
             continue
         seen.add(fp)
         cleaned["fingerprint"] = fp
+        cleaned["kind"] = kind
         tasks.append(cleaned)
     if run and rejects:
         for i, r in enumerate(rejects):
             run.report_sample(f"rejected task-invention output:\n{r}", step=0,
                               label=f"reject_task_{i}")
 
-    print(f"kept {len(tasks)}/{args.n_tasks} invented tasks after validation+dedup")
+    n_sci = sum(1 for t in tasks if t.get("kind") == "scicode")
+    print(f"kept {len(tasks)}/{args.n_tasks} invented tasks after validation+dedup "
+          f"({n_sci} scicode-style, {len(tasks) - n_sci} agent)")
     if run:
-        run.log({"distill/tasks_invented": args.n_tasks, "distill/tasks_kept": len(tasks)}, step=0)
+        run.log({"distill/tasks_invented": args.n_tasks, "distill/tasks_kept": len(tasks),
+                 "distill/tasks_scicode": n_sci, "distill/tasks_agent": len(tasks) - n_sci},
+                step=0)
 
     # ---- pass 2: generate trajectories --------------------------------------
     sp_traj = SamplingParams(temperature=0.7, top_p=0.95, max_tokens=2400)
