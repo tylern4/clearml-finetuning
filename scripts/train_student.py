@@ -42,8 +42,6 @@ def main() -> None:
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
-    run = cml.get_run_logger("train", vars(args))
-
     is_ddp = "RANK" in os.environ
     if is_ddp:
         dist.init_process_group("nccl")
@@ -51,9 +49,10 @@ def main() -> None:
         local = int(os.environ.get("LOCAL_RANK", 0))
     else:
         rank, world, local = 0, 1, 0
+    master = rank == 0
+    run = cml.get_run_logger("train", vars(args)) if master else None
     torch.cuda.set_device(local) if torch.cuda.is_available() else None
     device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
-    master = rank == 0
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
@@ -152,6 +151,9 @@ def main() -> None:
         model.print_trainable_parameters()
     model.gradient_checkpointing_enable()
     model.to(device)
+    if is_ddp:
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[local], output_device=local)
 
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95))
@@ -220,7 +222,7 @@ def main() -> None:
 
     if master:
         os.makedirs(args.out_dir, exist_ok=True)
-        model.save_pretrained(args.out_dir)
+        (model.module if hasattr(model, "module") else model).save_pretrained(args.out_dir)
         tok.save_pretrained(args.out_dir)
         if run:
             from pathlib import Path

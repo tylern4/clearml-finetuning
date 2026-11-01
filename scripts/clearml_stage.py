@@ -100,7 +100,10 @@ def main() -> None:
     elif stage == "scicode_data":
         cmd = [py, script]
     elif stage == "train":
-        cmd = [py, script, "--student", str(params["student"]),
+        nproc = int(params.get("nproc") or 4)
+        cmd = [py, "-m", "torch.distributed.run", "--standalone",
+               "--nproc_per_node", str(nproc), script,
+               "--student", str(params["student"]),
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--epochs", str(params["epochs"]),
