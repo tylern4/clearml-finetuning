@@ -18,7 +18,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STAGES = ("distill", "scicode_data", "code_data", "train", "eval", "convert_gguf")
+STAGES = ("distill", "scicode_data", "code_data", "code_distill", "train", "eval",
+          "convert_gguf")
 
 
 def main() -> None:
@@ -31,6 +32,9 @@ def main() -> None:
     ap.add_argument("--upstream-train", type=str, default="")
     ap.add_argument("--upstream-scicode", type=str, default="")
     ap.add_argument("--upstream-code", type=str, default="")
+    ap.add_argument("--upstream-code-distill", type=str, default="",
+                    help="upstream code_distill task id (teacher solutions for the "
+                         "code_data problems); consumed by the train stage")
     ap.add_argument("--resume-train", type=str, default="",
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
@@ -75,6 +79,7 @@ def main() -> None:
             "upstream_train": args.upstream_train,
             "upstream_scicode": args.upstream_scicode,
             "upstream_code": args.upstream_code,
+            "upstream_code_distill": args.upstream_code_distill,
             "resume_train": args.resume_train,
             "epoch_offset": args.epoch_offset,
             "hf_token": args.hf_token,
@@ -130,6 +135,7 @@ def main() -> None:
         "distill": "scripts/distill_data.py",
         "scicode_data": "scripts/scicode_data.py",
         "code_data": "scripts/code_data.py",
+        "code_distill": "scripts/code_distill.py",
         "train": "scripts/train_student.py",
         "eval": "scripts/eval_agent.py",
         "convert_gguf": "scripts/convert_gguf.py",
@@ -142,6 +148,9 @@ def main() -> None:
         cmd = [py, script]
     elif stage == "code_data":
         cmd = [py, script]
+    elif stage == "code_distill":
+        cmd = [py, script, "--code-task", str(params["upstream_code"]),
+               "--teacher", str(params["teacher"])]
     elif stage == "train":
         nproc = int(params.get("nproc") or 4)
         cmd = [py, "-m", "torch.distributed.run", "--standalone",
@@ -151,6 +160,7 @@ def main() -> None:
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--code-task", str(params["upstream_code"]),
+               "--code-distill-task", str(params.get("upstream_code_distill") or ""),
                "--resume-task", str(params.get("resume_train") or ""),
                "--epoch-offset", str(params.get("epoch_offset") or 0),
                "--epochs", str(params["epochs"]),
@@ -169,7 +179,7 @@ def main() -> None:
     env["CLEARML_RUN"] = "1"
     if stage == "code_data" and params.get("hf_token"):
         env["HF_TOKEN"] = str(params["hf_token"])
-    if stage in ("distill", "eval"):
+    if stage in ("distill", "code_distill", "eval"):
         # avoid the flashinfer JIT sampler (needs ninja + slow first-use compile)
         env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     print(f"+ {' '.join(cmd)}")

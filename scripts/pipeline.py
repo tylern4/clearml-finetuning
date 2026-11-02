@@ -32,6 +32,8 @@ REQUIREMENTS = {
     "scicode_data": ["clearml>=2.1", "boto3", "gdown", "h5py", "numpy", "matplotlib"],
     "code_data": ["clearml>=2.1", "boto3", "huggingface_hub", "datasets",
                   "pandas", "pyarrow", "matplotlib"],
+    "code_distill": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88",
+                     "clearml>=2.1", "boto3", "matplotlib"],
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
               "bitsandbytes>=0.46", "clearml>=2.1", "boto3", "matplotlib"],
     "eval": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88", "peft>=0.17",
@@ -40,7 +42,7 @@ REQUIREMENTS = {
                      "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3", "matplotlib"],
 }
 STAGE_TIMEOUTS = {"distill": 6 * 3600, "scicode_data": 2 * 3600, "code_data": 2 * 3600,
-                  "train": 12 * 3600,
+                  "code_distill": 6 * 3600, "train": 12 * 3600,
                   "eval": 8 * 3600, "convert_gguf": 3 * 3600}
 
 
@@ -171,10 +173,12 @@ def supervised_train(args, ids) -> None:
         distill_id = ids.get("distill", args.upstream_distill)
         scicode_id = ids.get("scicode_data", args.upstream_scicode)
         code_id = ids.get("code_data", args.upstream_code)
+        cdistill_id = ids.get("code_distill", args.upstream_code_distill)
         targs = ["--stage", "train", "--epochs", str(chunk),
                  "--upstream-distill", distill_id,
                  "--upstream-scicode", scicode_id,
                  "--upstream-code", code_id,
+                 "--upstream-code-distill", cdistill_id,
                  "--resume-train", resume,
                  "--epoch-offset", str(total)]
         ok = False
@@ -212,14 +216,17 @@ def supervised_train(args, ids) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--only", choices=["distill", "scicode_data", "code_data", "train",
-                                       "eval", "convert_gguf"])
+    ap.add_argument("--only", choices=["distill", "scicode_data", "code_data",
+                                       "code_distill", "train", "eval", "convert_gguf"])
     ap.add_argument("--from", dest="from_stage",
                     choices=["code_data", "train", "eval", "convert_gguf"])
     ap.add_argument("--upstream-distill", default="")
     ap.add_argument("--upstream-train", default="")
     ap.add_argument("--upstream-scicode", default="")
     ap.add_argument("--upstream-code", default="")
+    ap.add_argument("--upstream-code-distill", default="",
+                    help="upstream code_distill task id (teacher solutions for the "
+                         "code_data problems); consumed by train")
     ap.add_argument("--resume-train", default="",
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
@@ -258,12 +265,20 @@ def main() -> int:
     eval_args = ["--stage", "eval"]
 
     if args.only:
-        stage_args = code_args if args.only == "code_data" else ["--stage", args.only]
+        if args.only == "code_data":
+            stage_args = code_args
+        elif args.only == "code_distill":
+            stage_args = ["--stage", "code_distill", "--upstream-code", args.upstream_code]
+        else:
+            stage_args = ["--stage", args.only]
         ids[args.only] = run_stage(args.only, stage_args)
     elif args.all:
         ids["distill"] = run_stage("distill", distill_args)
         ids["scicode_data"] = run_stage("scicode_data", scicode_args)
         ids["code_data"] = run_stage("code_data", code_args)
+        ids["code_distill"] = run_stage("code_distill",
+                                       ["--stage", "code_distill",
+                                        "--upstream-code", ids["code_data"]])
         supervised_train(args, ids)
         ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                      "--upstream-distill", ids["distill"],
@@ -273,6 +288,9 @@ def main() -> int:
     elif args.from_stage:
         if args.from_stage == "code_data":
             ids["code_data"] = run_stage("code_data", code_args)
+            ids["code_distill"] = run_stage("code_distill",
+                                           ["--stage", "code_distill",
+                                            "--upstream-code", ids["code_data"]])
         if args.from_stage in ("code_data", "train"):
             supervised_train(args, ids)
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],

@@ -33,6 +33,11 @@ def main() -> None:
     ap.add_argument("--scicode-dir", type=str, default="scicode", help="local scicode dir if present")
     ap.add_argument("--code-task", type=str, default="", help="upstream code_data task id")
     ap.add_argument("--code-dir", type=str, default="code", help="local code-data dir if present")
+    ap.add_argument("--code-distill-task", type=str, default="",
+                    help="upstream code_distill task id (teacher solutions for the "
+                         "code_data problems)")
+    ap.add_argument("--code-distill-dir", type=str, default="code_distilled",
+                    help="local code-distilled dir if present")
     ap.add_argument("--resume-task", type=str, default="",
                     help="upstream train task id whose student-adapter artifact to resume LoRA from")
     ap.add_argument("--resume-dir", type=str, default="resume_adapter",
@@ -134,6 +139,18 @@ def main() -> None:
         sft_rows += [r["messages"] for r in code_rows]
         n_code = len(code_rows)
 
+    # ---- optional teacher-solved mix-in (code_distill stage: the teacher's own
+    #      answers to the code_data problems, across all four HF sources) ------
+    n_cdist = 0
+    cdist_train = os.path.join(args.code_distill_dir, "code_distilled.jsonl")
+    if args.code_distill_task and not os.path.exists(cdist_train):
+        fetch_upstream(args.code_distill_task, "code-distilled-data",
+                       args.code_distill_dir, ".cdist.ready", target_file=cdist_train)
+    if os.path.exists(cdist_train):
+        cdist_rows = data.read_jsonl(cdist_train)
+        sft_rows += [r["messages"] for r in cdist_rows]
+        n_cdist = len(cdist_rows)
+
     # ---- optional resume from a previous train job's adapter ----------------
     resume_dir = ""
     if args.resume_task:
@@ -156,8 +173,8 @@ def main() -> None:
         print(f"resume adapter: {resume_dir or 'none (fresh LoRA)'}")
     if master:
         print(f"loaded {len(sft_rows)} training rows "
-              f"({len(sft_rows) - n_scicode - n_code} agent + {n_scicode} scicode "
-              f"+ {n_code} code-data)")
+              f"({len(sft_rows) - n_scicode - n_code - n_cdist} agent + {n_scicode} scicode "
+              f"+ {n_code} code-data + {n_cdist} code-teacher)")
 
     # tokenize with assistant-only loss mask; fall back to masking the
     # assistant suffix if the chat template lacks generation markers
