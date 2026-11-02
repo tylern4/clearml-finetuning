@@ -39,7 +39,7 @@ def main() -> None:
         tensor_parallel_size=max(1, min(nproc, 4)),
         max_model_len=args.max_model_len,
         quantization="awq" if "awq" in args.teacher.lower() else None,
-        gpu_memory_utilization=0.90,
+        gpu_memory_utilization=float(os.environ.get("CML_GPU_MEM_UTIL", "0.90")),
     )
     tok = llm.get_tokenizer()
 
