@@ -139,8 +139,17 @@ def main() -> None:
     if args.resume_task:
         adapter_marker = os.path.join(args.resume_dir, "adapter_config.json")
         if not os.path.exists(adapter_marker):
-            fetch_upstream(args.resume_task, "student-adapter", args.resume_dir,
-                           ".resume.ready")
+            try:
+                fetch_upstream(args.resume_task, "student-adapter", args.resume_dir,
+                               ".resume.ready")
+            except RuntimeError:
+                # job was killed (e.g. 8h cap) before the final save: fall back
+                # to the latest periodic checkpoint artifact
+                if master:
+                    print(f"no final adapter on {args.resume_task}; "
+                          f"resuming from latest student-adapter-ckpt")
+                fetch_upstream(args.resume_task, "student-adapter-ckpt",
+                               args.resume_dir, ".resume.ready")
         if os.path.exists(adapter_marker):
             resume_dir = args.resume_dir
     if master:
@@ -181,8 +190,14 @@ def main() -> None:
 
     examples = []
     n_empty = 0
+    n_bad = 0
     for msgs in sft_rows:
-        ids, labels = tokenize(msgs)
+        try:
+            ids, labels = tokenize(msgs)
+        except Exception as e:
+            # e.g. jinja2 TemplateError: No user query found in messages
+            n_bad += 1
+            continue
         if len(ids) > args.max_len:
             ids, labels = ids[:args.max_len], labels[:args.max_len]
         if all(l == -100 for l in labels):
@@ -192,6 +207,8 @@ def main() -> None:
         examples.append((ids, labels))
     if master and n_empty:
         print(f"dropped {n_empty} rows with zero supervised tokens")
+    if master and n_bad:
+        print(f"dropped {n_bad} rows that failed tokenization")
     if not examples:
         raise RuntimeError(
             f"no trainable rows after tokenization - check the distill stage "

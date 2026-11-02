@@ -122,6 +122,94 @@ def run_stage(name: str, stage_args: list) -> str:
     return tid
 
 
+def try_stage(name: str, stage_args: list):
+    """Like run_stage but returns (task_id, status) instead of raising."""
+    print(f"== stage {name} ==")
+    tid = submit(stage_args)
+    finalize(tid, name)
+    print(f"  task {tid} enqueued to '{QUEUE}'")
+    st = wait_for(tid, STAGE_TIMEOUTS[name])
+    print(f"  stage {name}: {st}  ({tid})")
+    return tid, st
+
+
+def get_scalar(task_id: str, metric: str):
+    """Last reported value of a ClearML scalar metric, or None."""
+    from clearml import Task
+
+    try:
+        scalars = Task.get_task(task_id=task_id).get_reported_scalars() or {}
+        for _title, metrics in scalars.items():
+            for m, vals in (metrics or {}).items():
+                if m == metric and vals:
+                    return vals[-1][1]
+    except Exception as e:
+        print(f"  get_scalar({metric}) failed: {e}")
+    return None
+
+
+def supervised_train(args, ids) -> None:
+    """Keep launching train chunks until a stop criterion is met.
+
+    Chunks resume LoRA from the previous chunk's adapter. Stop when either
+    --max-total-epochs is reached or --eval-gate metric >= --eval-gate-min
+    after a chunk. A failed chunk is retried (up to --max-train-retries)
+    resuming from its latest checkpoint artifact.
+    """
+    total = args.epoch_offset
+    resume = args.resume_train
+    if resume:
+        st = wait_for(resume, 12 * 3600)
+        print(f"resume source {resume}: {st}")
+    while True:
+        chunk = args.epochs
+        if args.max_total_epochs > 0:
+            if total >= args.max_total_epochs:
+                print(f"reached max total epochs ({total})")
+                break
+            chunk = min(chunk, args.max_total_epochs - total)
+        distill_id = ids.get("distill", args.upstream_distill)
+        scicode_id = ids.get("scicode_data", args.upstream_scicode)
+        code_id = ids.get("code_data", args.upstream_code)
+        targs = ["--stage", "train", "--epochs", str(chunk),
+                 "--upstream-distill", distill_id,
+                 "--upstream-scicode", scicode_id,
+                 "--upstream-code", code_id,
+                 "--resume-train", resume,
+                 "--epoch-offset", str(total)]
+        ok = False
+        for attempt in range(args.max_train_retries + 1):
+            tid, st = try_stage("train", targs)
+            if st == "completed":
+                ids["train"] = tid
+                resume = tid
+                ok = True
+                break
+            print(f"  train chunk failed ({st}); attempt {attempt + 1}/"
+                  f"{args.max_train_retries + 1} - will resume from its checkpoint")
+            resume = tid  # resume from the failed chunk's latest ckpt
+        if not ok:
+            raise RuntimeError("train chunk failed after all retries")
+        total += chunk
+        print(f"total epochs done: {total}")
+        if args.eval_gate:
+            eval_id, st = try_stage("eval", ["--stage", "eval",
+                                             "--upstream-train", ids["train"],
+                                             "--upstream-distill", distill_id,
+                                             "--upstream-scicode", scicode_id])
+            ids["eval"] = eval_id
+            if st != "completed":
+                print(f"  eval after chunk failed ({st}); continuing training")
+            else:
+                val = get_scalar(eval_id, args.eval_gate)
+                print(f"  gate {args.eval_gate} = {val} (need >= {args.eval_gate_min})")
+                if val is not None and val >= args.eval_gate_min:
+                    print(f"eval gate passed ({args.eval_gate}={val}) - stopping training")
+                    return
+        if not args.max_total_epochs and not args.eval_gate:
+            break  # single-shot mode (default): one chunk, no gating
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", choices=["distill", "scicode_data", "code_data", "train",
@@ -139,6 +227,16 @@ def main() -> int:
     ap.add_argument("--hf-token", default="",
                     help="HF token for gated datasets in the code_data stage; defaults to "
                          "HF_TOKEN env or $HOME/.hf_token")
+    ap.add_argument("--max-total-epochs", type=int, default=0,
+                    help="keep launching train chunks (resuming each from the previous) "
+                         "until this many total epochs are done; 0 = single chunk")
+    ap.add_argument("--eval-gate", default="",
+                    help="ClearML scalar metric to gate training on after each chunk, "
+                         "e.g. eval/scicode_main_pass1 or eval/pass1")
+    ap.add_argument("--eval-gate-min", type=float, default=0.0,
+                    help="stop training when --eval-gate >= this value")
+    ap.add_argument("--max-train-retries", type=int, default=2,
+                    help="retries per train chunk on failure (resumes from checkpoint)")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--epochs", type=int, default=20,
                     help="training epochs passed to the train stage")
@@ -166,10 +264,7 @@ def main() -> int:
         ids["distill"] = run_stage("distill", distill_args)
         ids["scicode_data"] = run_stage("scicode_data", scicode_args)
         ids["code_data"] = run_stage("code_data", code_args)
-        ids["train"] = run_stage("train", train_args + [
-            "--upstream-distill", ids["distill"],
-            "--upstream-scicode", ids["scicode_data"],
-            "--upstream-code", ids["code_data"]])
+        supervised_train(args, ids)
         ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                      "--upstream-distill", ids["distill"],
                                                      "--upstream-scicode", ids["scicode_data"]])
@@ -179,13 +274,7 @@ def main() -> int:
         if args.from_stage == "code_data":
             ids["code_data"] = run_stage("code_data", code_args)
         if args.from_stage in ("code_data", "train"):
-            code_id = ids.get("code_data", args.upstream_code)
-            ids["train"] = run_stage("train", train_args + [
-                "--upstream-distill", args.upstream_distill,
-                "--upstream-scicode", args.upstream_scicode,
-                "--upstream-code", code_id,
-                "--resume-train", args.resume_train,
-                "--epoch-offset", str(args.epoch_offset)])
+            supervised_train(args, ids)
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                          "--upstream-distill", args.upstream_distill,
                                                          "--upstream-scicode", args.upstream_scicode])

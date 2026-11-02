@@ -62,7 +62,10 @@ def cap_text(t, limit=MAX_MSG_CHARS):
 def msg_row(system, messages, meta):
     messages = [{"role": m["role"], "content": cap_text(m["content"])}
                 for m in messages if m.get("content")]
-    if len(messages) < 2 or messages[-1]["role"] != "assistant":
+    # chat template (return_assistant_tokens_mask) needs a user turn + an
+    # assistant turn to mask; drop rows without both
+    if len(messages) < 2 or messages[-1]["role"] != "assistant" \
+            or not any(m["role"] == "user" for m in messages):
         return None
     return {"messages": [{"role": "system", "content": system}] + messages,
             "meta": meta}
