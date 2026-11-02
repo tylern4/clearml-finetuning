@@ -30,6 +30,10 @@ def main() -> None:
     ap.add_argument("--data-dir", type=str, default="distilled", help="local data dir if already present")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
     ap.add_argument("--scicode-dir", type=str, default="scicode", help="local scicode dir if present")
+    ap.add_argument("--student-quant", default=os.environ.get(
+        "CML_STUDENT_QUANT", "none"),
+        help="none|8bit|4bit: quantize the frozen base so a large student fits "
+             "a 40GB GPU under DDP (LoRA adapters stay bf16)")
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--lora-alpha", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -148,7 +152,7 @@ def main() -> None:
     # (e.g. Qwen3.8-27B = ~54GB) overflows a 40GB A100. CML_STUDENT_QUANT=8bit
     # (or 4bit) loads the frozen base quantized via bitsandbytes; only the LoRA
     # adapters stay bf16 and train.
-    quant = os.environ.get("CML_STUDENT_QUANT", "none").lower()
+    quant = (args.student_quant or "none").lower()
     load_kwargs = {"torch_dtype": torch.bfloat16, "attn_implementation": "sdpa"}
     if quant in ("8bit", "4bit"):
         from transformers import BitsAndBytesConfig

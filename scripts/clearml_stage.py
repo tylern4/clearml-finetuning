@@ -37,6 +37,9 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--humaneval-n", type=int, default=0)
+    ap.add_argument("--student-quant", default=os.environ.get(
+        "CML_STUDENT_QUANT", "none"),
+        help="none|8bit|4bit quantized base for large students")
     args, _ = ap.parse_known_args()
 
     from clearml import Task
@@ -58,6 +61,7 @@ def main() -> None:
             "epochs": args.epochs,
             "lora_r": args.lora_r,
             "humaneval_n": args.humaneval_n,
+            "student_quant": args.student_quant,
             "upstream_distill": args.upstream_distill,
             "upstream_train": args.upstream_train,
             "upstream_scicode": args.upstream_scicode,
@@ -105,6 +109,7 @@ def main() -> None:
         cmd = [py, "-m", "torch.distributed.run", "--standalone",
                "--nproc_per_node", str(nproc), script,
                "--student", str(params["student"]),
+               "--student-quant", str(params.get("student_quant") or "none"),
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--epochs", str(params["epochs"]),
