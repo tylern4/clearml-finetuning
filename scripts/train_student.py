@@ -60,12 +60,33 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(args.student)
 
     # ---- data: from upstream artifact or local dir ---------------------------
-    if args.data_task and not os.path.isdir(args.data_dir):
-        local = cml.download_artifact(args.data_task, "distilled-data")
-        os.makedirs(args.data_dir, exist_ok=True)
-        import shutil
-        for f in os.listdir(local):
-            shutil.copy(os.path.join(local, f), args.data_dir)
+    # All ranks share one filesystem: let rank 0 download/copy each upstream
+    # artifact exactly once and drop a sentinel file; other ranks poll for the
+    # sentinel so they never read a half-copied JSONL (truncated-line crash).
+    import shutil
+
+    def fetch_upstream(task_id, name, dest_dir, ready_name, target_file=None):
+        ready = os.path.join(dest_dir, ready_name)
+        if os.path.exists(ready):
+            return
+        if master:
+            local = cml.download_artifact(task_id, name)
+            os.makedirs(dest_dir, exist_ok=True)
+            if os.path.isdir(local):
+                for f in os.listdir(local):
+                    shutil.copy(os.path.join(local, f), dest_dir)
+            else:
+                shutil.copy(local, target_file or os.path.join(dest_dir, os.path.basename(local)))
+            open(ready, "w").close()
+        else:
+            deadline = time.time() + 3600
+            while not os.path.exists(ready):
+                if time.time() > deadline:
+                    raise RuntimeError(f"rank{rank}: timed out waiting for {ready}")
+                time.sleep(5)
+
+    if args.data_task:
+        fetch_upstream(args.data_task, "distilled-data", args.data_dir, ".distilled.ready")
 
     from clearml_finetuning import prompts
 
@@ -76,14 +97,8 @@ def main() -> None:
     n_scicode = 0
     scicode_train = os.path.join(args.scicode_dir, "scicode_train.jsonl")
     if args.scicode_task and not os.path.exists(scicode_train):
-        import shutil
-        local = cml.download_artifact(args.scicode_task, "scicode-data")
-        os.makedirs(args.scicode_dir, exist_ok=True)
-        if os.path.isdir(local):
-            for f in os.listdir(local):
-                shutil.copy(os.path.join(local, f), args.scicode_dir)
-        else:
-            shutil.copy(local, scicode_train)
+        fetch_upstream(args.scicode_task, "scicode-data", args.scicode_dir,
+                       ".scicode.ready", target_file=scicode_train)
     if os.path.exists(scicode_train):
         scicode_rows = data.read_jsonl(scicode_train)
         sft_rows += [r["messages"] for r in scicode_rows]
