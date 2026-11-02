@@ -131,11 +131,18 @@ def main() -> None:
         return ids, labels
 
     examples = []
+    n_empty = 0
     for msgs in sft_rows:
         ids, labels = tokenize(msgs)
         if len(ids) > args.max_len:
             ids, labels = ids[:args.max_len], labels[:args.max_len]
+        if all(l == -100 for l in labels):
+            # no supervised tokens -> HF loss would be NaN (0/0); drop the row
+            n_empty += 1
+            continue
         examples.append((ids, labels))
+    if master and n_empty:
+        print(f"dropped {n_empty} rows with zero supervised tokens")
     if not examples:
         raise RuntimeError(
             f"no trainable rows after tokenization - check the distill stage "
@@ -160,8 +167,11 @@ def main() -> None:
         if quant == "8bit":
             load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         else:
+            # fp32 compute: the gated-delta-rule (linear attention) scan in
+            # bf16 is numerically unstable and produced NaN loss in the first
+            # steps; fp32 dequant+matmul keeps it stable (base stays 4-bit).
             load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float32,
                 bnb_4bit_use_double_quant=True)
         load_kwargs.pop("torch_dtype", None)
         if torch.cuda.is_available():
@@ -170,6 +180,18 @@ def main() -> None:
             print(f"loading student base in {quant} (bnb); LoRA stays bf16")
     model = AutoModelForCausalLM.from_pretrained(args.student, **load_kwargs)
     model.config.use_cache = False
+    if quant == "none":
+        # hybrid (linear-attention) models run the gated-delta-rule scan in the
+        # model dtype; bf16 makes it numerically unstable -> upcast just those
+        # modules to fp32 (cheap: they are a fraction of the params)
+        n_up = 0
+        for _name, mod in model.named_modules():
+            cn = type(mod).__name__.lower()
+            if "gateddelta" in cn or "linearattention" in cn or "gated_delta" in cn:
+                mod.to(torch.float32)
+                n_up += 1
+        if master and n_up:
+            print(f"upcast {n_up} linear-attention modules to fp32")
     lora_cfg = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=0.05, bias="none",
         task_type="CAUSAL_LM",
@@ -234,15 +256,29 @@ def main() -> None:
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
             out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
             loss = out.loss / args.grad_accum
+            if not torch.isfinite(loss):
+                # non-finite loss would poison the weights via NaN grads; skip
+                # this micro-batch entirely
+                if master:
+                    print(f"step {step} micro {mi}: non-finite loss "
+                          f"({loss.item()}), skipping", flush=True)
+                opt.zero_grad(set_to_none=True)
+                continue
             loss.backward()
             accum_loss += loss.item()
             tokens_seen += int(attn.sum().item())
             if (mi + 1) % args.grad_accum == 0 or mi == len(micro_batches) - 1:
                 for g in opt.param_groups:
                     g["lr"] = lr_at(step)
-                torch.nn.utils.clip_grad_norm_(params, 1.0)
-                opt.step()
-                opt.zero_grad(set_to_none=True)
+                total_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
+                if not torch.isfinite(total_norm):
+                    if master:
+                        print(f"step {step}: non-finite grad norm, skipping "
+                              f"optimizer step", flush=True)
+                    opt.zero_grad(set_to_none=True)
+                else:
+                    opt.step()
+                    opt.zero_grad(set_to_none=True)
                 if master:
                     dt = time.time() - t0
                     t0 = time.time()
