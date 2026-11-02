@@ -145,9 +145,11 @@ def main() -> None:
     if run:
         from pathlib import Path
 
-        files = quants + ([f16] if os.path.exists(f16) else []) + [readme]
-        for path in files:
-            run.task.upload_artifact("gguf", Path(path), wait_on_upload=True)
+        # Upload the whole output directory as ONE artifact so every GGUF
+        # (plus README) is preserved under artifacts/gguf/. Uploading each
+        # file separately under the same name "gguf" would overwrite the
+        # artifact pointer each time, leaving only the last file registered.
+        run.task.upload_artifact("gguf", Path(args.out_dir), wait_on_upload=True)
         run.finish()
 
 
