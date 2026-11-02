@@ -29,15 +29,15 @@ TERMINAL = {"completed", "failed", "stopped"}
 REQUIREMENTS = {
     "distill": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88",
                 "clearml>=2.1", "boto3", "matplotlib"],
-    "scicode_data": ["clearml>=2.1", "boto3", "gdown", "h5py", "numpy"],
+    "scicode_data": ["clearml>=2.1", "boto3", "gdown", "h5py", "numpy", "matplotlib"],
     "code_data": ["clearml>=2.1", "boto3", "huggingface_hub", "datasets",
-                  "pandas", "pyarrow"],
+                  "pandas", "pyarrow", "matplotlib"],
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
               "bitsandbytes>=0.46", "clearml>=2.1", "boto3", "matplotlib"],
     "eval": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88", "peft>=0.17",
              "h5py", "numpy", "scipy", "clearml>=2.1", "boto3", "matplotlib"],
     "convert_gguf": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17",
-                     "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3"],
+                     "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3", "matplotlib"],
 }
 STAGE_TIMEOUTS = {"distill": 6 * 3600, "scicode_data": 2 * 3600, "code_data": 2 * 3600,
                   "train": 12 * 3600,
