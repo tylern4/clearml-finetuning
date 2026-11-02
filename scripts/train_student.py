@@ -11,6 +11,7 @@ import math
 import os
 import sys
 import time
+from datetime import timedelta
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
@@ -48,7 +49,9 @@ def main() -> None:
 
     is_ddp = "RANK" in os.environ
     if is_ddp:
-        dist.init_process_group("nccl")
+        # 27B 4-bit fp32 + reference linear-attn kernels make steps slow
+        # (~2-10 min); the default 600s NCCL watchdog aborts on rank skew.
+        dist.init_process_group("nccl", timeout=timedelta(minutes=60))
         rank, world = dist.get_rank(), dist.get_world_size()
         local = int(os.environ.get("LOCAL_RANK", 0))
     else:
