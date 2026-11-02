@@ -164,8 +164,15 @@ def main() -> None:
         lens = sorted(len(e[0]) for e in examples)
         print(f"tokenized: {len(examples)} rows, len p50={lens[len(lens)//2]} p95={lens[int(len(lens)*.95)]} max={lens[-1]}")
 
-    # shard across ranks
-    shard = examples[rank::world]
+    # Shard micro-batches (not rows) across ranks, padding to a multiple of
+    # world size so every rank executes the SAME number of forward/backward
+    # (and therefore DDP allreduce) calls — a one-micro-batch count mismatch
+    # deadlocks the process group at the end-of-epoch barrier.
+    all_mb = [examples[i:i + args.device_batch_size]
+              for i in range(0, len(examples), args.device_batch_size)]
+    while len(all_mb) % world:
+        all_mb.append(all_mb[-1])
+    shard = all_mb[rank::world]
 
     # ---- model ---------------------------------------------------------------
     # DDP keeps a full base-model replica per rank, so a >~20B bf16 student
@@ -243,7 +250,7 @@ def main() -> None:
             attn.append([1] * len(ids) + [0] * pad)
         return (torch.tensor(input_ids), torch.tensor(labels), torch.tensor(attn))
 
-    steps_per_epoch = math.ceil(math.ceil(len(shard) / args.device_batch_size) / args.grad_accum)
+    steps_per_epoch = math.ceil(len(shard) / args.grad_accum)
     total_steps = steps_per_epoch * args.epochs
     if master:
         print(f"steps/epoch={steps_per_epoch} total_steps={total_steps}")
@@ -260,9 +267,11 @@ def main() -> None:
     model.train()
     stop = False
     for epoch in range(args.epochs):
-        rng = torch.Generator().manual_seed(1234 + epoch + rank)
-        order = torch.randperm(len(shard), generator=rng).tolist()
-        micro_batches = [shard[i:i + args.device_batch_size] for i in range(0, len(shard), args.device_batch_size)]
+        rng = torch.Generator().manual_seed(1234 + epoch)
+        order = torch.randperm(len(all_mb), generator=rng).tolist()
+        # identical permutation on every rank, then each rank takes its slice
+        # so micro-batch counts stay equal across ranks
+        micro_batches = [all_mb[i] for i in order][rank::world]
         opt.zero_grad(set_to_none=True)
         for mi, mb in enumerate(micro_batches):
             input_ids, labels, attn = collate(mb)
