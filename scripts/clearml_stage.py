@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-STAGES = ("distill", "scicode_data", "train", "eval", "convert_gguf")
+STAGES = ("distill", "scicode_data", "code_data", "train", "eval", "convert_gguf")
 
 
 def main() -> None:
@@ -30,6 +30,7 @@ def main() -> None:
     ap.add_argument("--upstream-distill", type=str, default="")
     ap.add_argument("--upstream-train", type=str, default="")
     ap.add_argument("--upstream-scicode", type=str, default="")
+    ap.add_argument("--upstream-code", type=str, default="")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
@@ -66,6 +67,7 @@ def main() -> None:
             "upstream_distill": args.upstream_distill,
             "upstream_train": args.upstream_train,
             "upstream_scicode": args.upstream_scicode,
+            "upstream_code": args.upstream_code,
             "nproc": int(os.environ.get("NPROC", "4")),
         },
         name="stage",
@@ -117,6 +119,7 @@ def main() -> None:
     script = {
         "distill": "scripts/distill_data.py",
         "scicode_data": "scripts/scicode_data.py",
+        "code_data": "scripts/code_data.py",
         "train": "scripts/train_student.py",
         "eval": "scripts/eval_agent.py",
         "convert_gguf": "scripts/convert_gguf.py",
@@ -127,6 +130,8 @@ def main() -> None:
                "--n-tasks", str(params["n_tasks"])]
     elif stage == "scicode_data":
         cmd = [py, script]
+    elif stage == "code_data":
+        cmd = [py, script]
     elif stage == "train":
         nproc = int(params.get("nproc") or 4)
         cmd = [py, "-m", "torch.distributed.run", "--standalone",
@@ -135,6 +140,7 @@ def main() -> None:
                "--student-quant", str(params.get("student_quant") or "none"),
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
+               "--code-task", str(params["upstream_code"]),
                "--epochs", str(params["epochs"]),
                "--lora-r", str(params["lora_r"])]
     elif stage == "eval":

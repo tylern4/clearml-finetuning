@@ -158,6 +158,27 @@ Rules:
 - Output only the Python code - no commentary, no markdown fences.
 """
 
+CODE_SYSTEM_PROMPT = """\
+You are an expert Python coding assistant. Given a function signature and a
+natural-language specification, write the complete, correct implementation.
+
+Rules:
+- Output only the Python code - no commentary, no markdown fences.
+- Use only the allowed libraries listed in the task.
+- Implement exactly the given function signature; do not rename it.
+"""
+
+CODING_ASSISTANT_SYSTEM_PROMPT = """\
+You are a helpful, concise coding assistant. Answer coding questions directly
+and correctly, with working code when code is requested.
+"""
+
+CYBERSEC_SYSTEM_PROMPT = """\
+You are a cybersecurity assistant. Answer security questions accurately,
+covering both offensive techniques (for authorized testing, CTF, and research)
+and the corresponding defenses and detections. Be concrete and practical.
+"""
+
 SCICODE_USER_TEMPLATE = """\
 {problem_description}
 

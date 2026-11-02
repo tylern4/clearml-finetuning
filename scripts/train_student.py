@@ -31,6 +31,8 @@ def main() -> None:
     ap.add_argument("--data-dir", type=str, default="distilled", help="local data dir if already present")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
     ap.add_argument("--scicode-dir", type=str, default="scicode", help="local scicode dir if present")
+    ap.add_argument("--code-task", type=str, default="", help="upstream code_data task id")
+    ap.add_argument("--code-dir", type=str, default="code", help="local code-data dir if present")
     ap.add_argument("--student-quant", default=os.environ.get(
         "CML_STUDENT_QUANT", "none"),
         help="none|8bit|4bit: quantize the frozen base so a large student fits "
@@ -110,9 +112,22 @@ def main() -> None:
         scicode_rows = data.read_jsonl(scicode_train)
         sft_rows += [r["messages"] for r in scicode_rows]
         n_scicode = len(scicode_rows)
+
+    # ---- optional extra code-domain mix-in (bigcodebench / terminal-bench /
+    #      SWE-chat / cyber-security rows from the code_data stage) ------------
+    n_code = 0
+    code_train = os.path.join(args.code_dir, "code_train.jsonl")
+    if args.code_task and not os.path.exists(code_train):
+        fetch_upstream(args.code_task, "code-data", args.code_dir,
+                       ".code.ready", target_file=code_train)
+    if os.path.exists(code_train):
+        code_rows = data.read_jsonl(code_train)
+        sft_rows += [r["messages"] for r in code_rows]
+        n_code = len(code_rows)
     if master:
         print(f"loaded {len(sft_rows)} training rows "
-              f"({len(sft_rows) - n_scicode} agent + {n_scicode} scicode)")
+              f"({len(sft_rows) - n_scicode - n_code} agent + {n_scicode} scicode "
+              f"+ {n_code} code-data)")
 
     # tokenize with assistant-only loss mask; fall back to masking the
     # assistant suffix if the chat template lacks generation markers
