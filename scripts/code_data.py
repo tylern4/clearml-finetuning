@@ -29,7 +29,7 @@ import urllib.request
 if not os.environ.get("HF_TOKEN"):
     from pathlib import Path
 
-    _home = Path(os.environ.get("HOME") or Path.home())
+    _home = Path.home()
     for _tok_file in (_home / ".hf_token",
                       _home / ".cache" / "huggingface" / "token",
                       Path.home() / ".hf_token"):
