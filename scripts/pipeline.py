@@ -65,24 +65,30 @@ def submit(stage_args: list) -> str:
 
 
 def finalize(task_id: str, stage: str):
-    """Reset, pin repo/commit + stage requirements, set docker, enqueue."""
+    """Enqueue. The stage runner already pinned repo/commit/requirements/docker
+    before its own execute_remotely enqueue; re-apply here best-effort in case
+    the task is still editable (a fast worker may already have grabbed it, in
+    which case the server rejects edits with ValueError and we just proceed)."""
     from clearml import Task
 
     t = Task.get_task(task_id=task_id)
-    t.reset()
-    commit = git_head()
-    if not commit:
-        raise RuntimeError("cannot resolve origin/{branch} - push the repo first")
-    t._edit(script={
-        "repository": REPO_URL,
-        "branch": BRANCH,
-        "version_num": commit,
-        "working_dir": ".",
-        "entry_point": "scripts/clearml_stage.py",
-        "requirements": {"pip": REQUIREMENTS[stage]},
-    })
-    t.set_base_docker(docker_image=DOCKER)
-    t.flush()
+    try:
+        t.reset()
+        commit = git_head()
+        if not commit:
+            raise RuntimeError("cannot resolve origin/{branch} - push the repo first")
+        t._edit(script={
+            "repository": REPO_URL,
+            "branch": BRANCH,
+            "version_num": commit,
+            "working_dir": ".",
+            "entry_point": "scripts/clearml_stage.py",
+            "requirements": {"pip": REQUIREMENTS[stage]},
+        })
+        t.set_base_docker(docker_image=DOCKER)
+        t.flush()
+    except ValueError:
+        print(f"  task {task_id} already picked up by a worker; skipping re-pin")
     from clearml import Task as T
 
     T.enqueue(t, queue_name=QUEUE)

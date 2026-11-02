@@ -13,6 +13,7 @@ Append --register to only create the task.
 
 import argparse
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -81,6 +82,28 @@ def main() -> None:
         print(f"register stage task: id={task.id}")
         task.close()
         return
+
+    if args.stage:
+        # Pin the task to the pushed repo HEAD + stage requirements + docker
+        # BEFORE enqueueing: a fast worker can otherwise grab the queued task
+        # mid-finalize and the server rejects the edits (ValueError race).
+        from scripts.pipeline import BRANCH, DOCKER, REPO_DIR, REPO_URL, REQUIREMENTS
+
+        commit = subprocess.run(
+            ["git", "rev-parse", f"origin/{BRANCH}"],
+            cwd=REPO_DIR, capture_output=True, text=True).stdout.strip()
+        if not commit:
+            raise RuntimeError(f"cannot resolve origin/{BRANCH} - push the repo first")
+        task._edit(script={
+            "repository": REPO_URL,
+            "branch": BRANCH,
+            "version_num": commit,
+            "working_dir": ".",
+            "entry_point": "scripts/clearml_stage.py",
+            "requirements": {"pip": REQUIREMENTS[args.stage]},
+        })
+        task.set_base_docker(docker_image=DOCKER)
+        task.flush()
 
     task.execute_remotely(queue_name=os.environ.get("CLEARML_QUEUE", "muller"))
 
