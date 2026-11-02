@@ -27,13 +27,14 @@ import urllib.request
 # $HOME/.cache/huggingface/token; also accept the $HOME/.hf_token convention
 # (on the compute nodes $HOME is the worker's home, not the login home)
 if not os.environ.get("HF_TOKEN"):
-    _home = os.environ.get("HOME") or os.path.expanduser("~")
-    for _tok_file in (os.path.join(_home, ".hf_token"),
-                      os.path.join(_home, ".cache", "huggingface", "token"),
-                      os.path.expanduser("~/.hf_token")):
-        if os.path.exists(_tok_file):
-            with open(_tok_file) as _f:
-                os.environ["HF_TOKEN"] = _f.read().strip()
+    from pathlib import Path
+
+    _home = Path(os.environ.get("HOME") or Path.home())
+    for _tok_file in (_home / ".hf_token",
+                      _home / ".cache" / "huggingface" / "token",
+                      Path.home() / ".hf_token"):
+        if _tok_file.exists():
+            os.environ["HF_TOKEN"] = _tok_file.read_text().strip()
             print(f"HF_TOKEN loaded from {_tok_file}")
             break
     else:
