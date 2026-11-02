@@ -33,6 +33,15 @@ def main() -> None:
     ap.add_argument("--scicode-dir", type=str, default="scicode", help="local scicode dir if present")
     ap.add_argument("--code-task", type=str, default="", help="upstream code_data task id")
     ap.add_argument("--code-dir", type=str, default="code", help="local code-data dir if present")
+    ap.add_argument("--resume-task", type=str, default="",
+                    help="upstream train task id whose student-adapter artifact to resume LoRA from")
+    ap.add_argument("--resume-dir", type=str, default="resume_adapter",
+                    help="local dir holding the adapter to resume from")
+    ap.add_argument("--save-every", type=int, default=40,
+                    help="checkpoint + upload adapter every N optimizer steps (0=off); "
+                         "survives an 8h-cap kill so a later job can resume")
+    ap.add_argument("--epoch-offset", type=int, default=0,
+                    help="added to the epoch seed when resuming (chunked multi-job training)")
     ap.add_argument("--student-quant", default=os.environ.get(
         "CML_STUDENT_QUANT", "none"),
         help="none|8bit|4bit: quantize the frozen base so a large student fits "
@@ -124,6 +133,18 @@ def main() -> None:
         code_rows = data.read_jsonl(code_train)
         sft_rows += [r["messages"] for r in code_rows]
         n_code = len(code_rows)
+
+    # ---- optional resume from a previous train job's adapter ----------------
+    resume_dir = ""
+    if args.resume_task:
+        adapter_marker = os.path.join(args.resume_dir, "adapter_config.json")
+        if not os.path.exists(adapter_marker):
+            fetch_upstream(args.resume_task, "student-adapter", args.resume_dir,
+                           ".resume.ready")
+        if os.path.exists(adapter_marker):
+            resume_dir = args.resume_dir
+    if master:
+        print(f"resume adapter: {resume_dir or 'none (fresh LoRA)'}")
     if master:
         print(f"loaded {len(sft_rows)} training rows "
               f"({len(sft_rows) - n_scicode - n_code} agent + {n_scicode} scicode "
@@ -233,15 +254,23 @@ def main() -> None:
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
     )
-    try:
-        model = get_peft_model(model, lora_cfg)
-    except ValueError:
-        # newer architectures may rename projections; attach LoRA to all
-        # linear layers except the head instead
+    if resume_dir:
+        # continue training the previous job's LoRA weights on the fresh base
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, resume_dir)
         if master:
-            print("standard LoRA targets not found; falling back to all-linear")
-        lora_cfg.target_modules = "all-linear"
-        model = get_peft_model(model, lora_cfg)
+            print(f"resumed LoRA weights from {resume_dir}")
+    else:
+        try:
+            model = get_peft_model(model, lora_cfg)
+        except ValueError:
+            # newer architectures may rename projections; attach LoRA to all
+            # linear layers except the head instead
+            if master:
+                print("standard LoRA targets not found; falling back to all-linear")
+            lora_cfg.target_modules = "all-linear"
+            model = get_peft_model(model, lora_cfg)
     if master:
         model.print_trainable_parameters()
     model.gradient_checkpointing_enable()
@@ -282,7 +311,7 @@ def main() -> None:
     model.train()
     stop = False
     for epoch in range(args.epochs):
-        rng = torch.Generator().manual_seed(1234 + epoch)
+        rng = torch.Generator().manual_seed(1234 + epoch + args.epoch_offset)
         order = torch.randperm(len(all_mb), generator=rng).tolist()
         # identical permutation on every rank, then each rank takes its slice
         # so micro-batch counts stay equal across ranks
@@ -328,6 +357,21 @@ def main() -> None:
                     }, step=None)
                 accum_loss, tokens_seen = 0.0, 0
                 step += 1
+                # periodic checkpoint: saved locally + uploaded as an artifact so
+                # it survives an 8h-cap kill; a later job resumes via --resume-task
+                if args.save_every and step % args.save_every == 0:
+                    if master:
+                        ckpt = os.path.join(args.out_dir, f"ckpt-step{step}")
+                        os.makedirs(ckpt, exist_ok=True)
+                        (model.module if hasattr(model, "module") else model).save_pretrained(ckpt)
+                        tok.save_pretrained(ckpt)
+                        if run:
+                            from pathlib import Path
+                            run.task.upload_artifact(
+                                "student-adapter-ckpt", Path(ckpt), wait_on_upload=True)
+                        print(f"saved checkpoint at step {step} -> {ckpt}", flush=True)
+                    if is_ddp:
+                        dist.barrier()
         if is_ddp:
             dist.barrier()
 

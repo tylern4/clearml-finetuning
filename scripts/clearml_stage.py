@@ -31,6 +31,10 @@ def main() -> None:
     ap.add_argument("--upstream-train", type=str, default="")
     ap.add_argument("--upstream-scicode", type=str, default="")
     ap.add_argument("--upstream-code", type=str, default="")
+    ap.add_argument("--resume-train", type=str, default="",
+                    help="previous train task id to resume LoRA from (chunked training)")
+    ap.add_argument("--epoch-offset", type=int, default=0,
+                    help="epoch seed offset for resumed chunks")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
@@ -68,6 +72,8 @@ def main() -> None:
             "upstream_train": args.upstream_train,
             "upstream_scicode": args.upstream_scicode,
             "upstream_code": args.upstream_code,
+            "resume_train": args.resume_train,
+            "epoch_offset": args.epoch_offset,
             "nproc": int(os.environ.get("NPROC", "4")),
         },
         name="stage",
@@ -141,6 +147,8 @@ def main() -> None:
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--code-task", str(params["upstream_code"]),
+               "--resume-task", str(params.get("resume_train") or ""),
+               "--epoch-offset", str(params.get("epoch_offset") or 0),
                "--epochs", str(params["epochs"]),
                "--lora-r", str(params["lora_r"])]
     elif stage == "eval":

@@ -132,6 +132,10 @@ def main() -> int:
     ap.add_argument("--upstream-train", default="")
     ap.add_argument("--upstream-scicode", default="")
     ap.add_argument("--upstream-code", default="")
+    ap.add_argument("--resume-train", default="",
+                    help="previous train task id to resume LoRA from (chunked training)")
+    ap.add_argument("--epoch-offset", type=int, default=0,
+                    help="epoch seed offset passed to the train stage (for resumed chunks)")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--epochs", type=int, default=20,
                     help="training epochs passed to the train stage")
@@ -168,7 +172,9 @@ def main() -> int:
             ids["train"] = run_stage("train", train_args + [
                 "--upstream-distill", args.upstream_distill,
                 "--upstream-scicode", args.upstream_scicode,
-                "--upstream-code", code_id])
+                "--upstream-code", code_id,
+                "--resume-train", args.resume_train,
+                "--epoch-offset", str(args.epoch_offset)])
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                          "--upstream-distill", args.upstream_distill,
                                                          "--upstream-scicode", args.upstream_scicode])
