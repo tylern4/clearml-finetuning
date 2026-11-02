@@ -24,12 +24,21 @@ import sys
 import urllib.request
 
 # gated datasets need an HF token: huggingface_hub reads HF_TOKEN or
-# ~/.cache/huggingface/token; also accept the local ~/.hf_token convention
+# $HOME/.cache/huggingface/token; also accept the $HOME/.hf_token convention
+# (on the compute nodes $HOME is the worker's home, not the login home)
 if not os.environ.get("HF_TOKEN"):
-    _tok_file = os.path.expanduser("~/.hf_token")
-    if os.path.exists(_tok_file):
-        with open(_tok_file) as _f:
-            os.environ["HF_TOKEN"] = _f.read().strip()
+    _home = os.environ.get("HOME") or os.path.expanduser("~")
+    for _tok_file in (os.path.join(_home, ".hf_token"),
+                      os.path.join(_home, ".cache", "huggingface", "token"),
+                      os.path.expanduser("~/.hf_token")):
+        if os.path.exists(_tok_file):
+            with open(_tok_file) as _f:
+                os.environ["HF_TOKEN"] = _f.read().strip()
+            print(f"HF_TOKEN loaded from {_tok_file}")
+            break
+    else:
+        print(f"no HF token found (looked in {_home}/.hf_token etc.) - "
+              f"gated datasets will be skipped")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,7 +73,7 @@ def bigcodebench_rows(cap):
     from huggingface_hub import hf_hub_download
     import pandas as pd
 
-    path = hf_hub_download(BCB_REPO, BCB_PARQUET)
+    path = hf_hub_download(BCB_REPO, BCB_PARQUET, repo_type="dataset")
     df = pd.read_parquet(path)
     rows = []
     for _, r in df.iterrows():
@@ -108,7 +117,9 @@ def tbs_rows(cap):
         if not loc:
             continue
         try:
-            solve = hf_hub_download(TBS_REPO, f"tasks/{loc}/solution/solve.sh")
+            # `location` already includes the tasks/ prefix
+            solve = hf_hub_download(TBS_REPO, f"{loc}/solution/solve.sh",
+                                    repo_type="dataset")
             with open(solve, encoding="utf-8", errors="replace") as f:
                 script = f.read()
         except Exception as e:
