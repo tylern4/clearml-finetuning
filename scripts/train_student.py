@@ -129,8 +129,27 @@ def main() -> None:
     shard = examples[rank::world]
 
     # ---- model ---------------------------------------------------------------
-    model = AutoModelForCausalLM.from_pretrained(
-        args.student, torch_dtype=torch.bfloat16, attn_implementation="sdpa")
+    # DDP keeps a full base-model replica per rank, so a >~20B bf16 student
+    # (e.g. Qwen3.8-27B = ~54GB) overflows a 40GB A100. CML_STUDENT_QUANT=8bit
+    # (or 4bit) loads the frozen base quantized via bitsandbytes; only the LoRA
+    # adapters stay bf16 and train.
+    quant = os.environ.get("CML_STUDENT_QUANT", "none").lower()
+    load_kwargs = {"torch_dtype": torch.bfloat16, "attn_implementation": "sdpa"}
+    if quant in ("8bit", "4bit"):
+        from transformers import BitsAndBytesConfig
+
+        if quant == "8bit":
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        else:
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True)
+        load_kwargs.pop("torch_dtype", None)
+        if torch.cuda.is_available():
+            load_kwargs["device_map"] = {"": f"cuda:{local}"}
+        if master:
+            print(f"loading student base in {quant} (bnb); LoRA stays bf16")
+    model = AutoModelForCausalLM.from_pretrained(args.student, **load_kwargs)
     model.config.use_cache = False
     lora_cfg = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=0.05, bias="none",

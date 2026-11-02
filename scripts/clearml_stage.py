@@ -42,7 +42,8 @@ def main() -> None:
     from clearml import Task
 
     task = Task.init(
-        project_name=os.environ.get("CLEARML_PROJECT", "clearml-finetuning"),
+        project_name=os.environ.get("CML_PROJECT")
+        or os.environ.get("CLEARML_PROJECT", "clearml-finetuning"),
         task_name=f"finetune-{args.stage or 'draft'}",
         task_type=Task.TaskTypes.training,
         auto_connect_frameworks=False,

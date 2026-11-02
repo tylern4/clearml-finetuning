@@ -31,6 +31,7 @@ def main() -> None:
     args = ap.parse_args()
 
     run = cml.get_run_logger("distill", vars(args))
+    cml.prepare_vllm_nvrtc()  # FP8 teachers JIT via NVRTC; runtime image lacks it
     from vllm import LLM, SamplingParams
 
     nproc = int(os.environ.get("NPROC", "4"))

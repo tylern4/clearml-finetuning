@@ -86,6 +86,7 @@ def main() -> None:
     args = ap.parse_args()
 
     run = cml.get_run_logger("eval", vars(args), task_type="testing")
+    cml.prepare_vllm_nvrtc()  # harmless for BF16 students; needed for FP8 checkpoints
 
     from vllm import LLM
     from vllm.lora.request import LoRARequest

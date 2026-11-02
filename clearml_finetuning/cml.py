@@ -10,6 +10,27 @@ import os
 _TERMINAL = {"completed", "failed", "stopped", "closed", "published"}
 
 
+def prepare_vllm_nvrtc():
+    """Expose the pip-provided CUDA NVRTC builtins to forked vLLM workers.
+
+    vLLM's FP8 "humming" kernel JIT-compiles a weight-repack kernel through
+    NVRTC at model load and needs libnvrtc-builtins.so, which the CUDA
+    *runtime* docker image does not ship. The nvidia-cuda-nvrtc-cuXX pip
+    wheel provides it under site-packages/nvidia/cuda_nvrtc/lib; prepend that
+    directory to LD_LIBRARY_PATH before vllm is imported (workers are forked,
+    so they inherit this environment).
+    """
+    import glob
+    import site
+
+    roots = list(site.getsitepackages()) + [site.getusersitepackages()]
+    for sp in roots:
+        for libdir in glob.glob(os.path.join(sp, "nvidia", "cuda_nvrtc", "lib")):
+            cur = os.environ.get("LD_LIBRARY_PATH", "")
+            if libdir not in cur.split(os.pathsep):
+                os.environ["LD_LIBRARY_PATH"] = libdir + os.pathsep + cur
+
+
 class ClearMLRun:
     """Run logger with a minimal surface: log(), report_sample(), finish()."""
 
@@ -18,7 +39,8 @@ class ClearMLRun:
         from clearml import Task
 
         self.task = Task.init(
-            project_name=project or os.environ.get("CLEARML_PROJECT", "clearml-finetuning"),
+            project_name=project or os.environ.get("CML_PROJECT")
+            or os.environ.get("CLEARML_PROJECT", "clearml-finetuning"),
             task_name=run_name or "run",
             task_type=getattr(Task.TaskTypes, task_type),
             auto_connect_frameworks=False,
