@@ -23,6 +23,14 @@ import random
 import sys
 import urllib.request
 
+# gated datasets need an HF token: huggingface_hub reads HF_TOKEN or
+# ~/.cache/huggingface/token; also accept the local ~/.hf_token convention
+if not os.environ.get("HF_TOKEN"):
+    _tok_file = os.path.expanduser("~/.hf_token")
+    if os.path.exists(_tok_file):
+        with open(_tok_file) as _f:
+            os.environ["HF_TOKEN"] = _f.read().strip()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from clearml_finetuning import cml, data, prompts  # noqa: E402
