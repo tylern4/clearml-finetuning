@@ -30,10 +30,8 @@ if not os.environ.get("HF_TOKEN"):
     from pathlib import Path
 
     _home = Path.home()
-    for _tok_file in (_home / ".hf_token",                       # $HOME/.hf_token (muller dasml home)
-                      _home / ".cache" / "huggingface" / "token",
-                      Path("/mscratch/sd/d/dasml/.hf_token"),    # worker container HOME=/root; dasml home is on mscratch
-                      Path("/mscratch/sd/d/dasml/.cache/huggingface/token")):
+    for _tok_file in (_home / ".hf_token",
+                      _home / ".cache" / "huggingface" / "token"):
         if _tok_file.exists():
             os.environ["HF_TOKEN"] = _tok_file.read_text().strip()
             print(f"HF_TOKEN loaded from {_tok_file}")
