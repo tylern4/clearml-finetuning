@@ -136,21 +136,32 @@ def main() -> int:
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
                     help="epoch seed offset passed to the train stage (for resumed chunks)")
+    ap.add_argument("--hf-token", default="",
+                    help="HF token for gated datasets in the code_data stage; defaults to "
+                         "HF_TOKEN env or $HOME/.hf_token")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--epochs", type=int, default=20,
                     help="training epochs passed to the train stage")
     args = ap.parse_args()
 
+    hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
+    if not hf_token:
+        _tok = os.path.expanduser("~/.hf_token")
+        if os.path.exists(_tok):
+            with open(_tok) as _f:
+                hf_token = _f.read().strip()
+    code_args = ["--stage", "code_data"] + (["--hf-token", hf_token] if hf_token else [])
+
     t0 = time.time()
     ids = {}
     distill_args = ["--stage", "distill"]
     scicode_args = ["--stage", "scicode_data"]
-    code_args = ["--stage", "code_data"]
     train_args = ["--stage", "train", "--epochs", str(args.epochs)]
     eval_args = ["--stage", "eval"]
 
     if args.only:
-        ids[args.only] = run_stage(args.only, ["--stage", args.only])
+        stage_args = code_args if args.only == "code_data" else ["--stage", args.only]
+        ids[args.only] = run_stage(args.only, stage_args)
     elif args.all:
         ids["distill"] = run_stage("distill", distill_args)
         ids["scicode_data"] = run_stage("scicode_data", scicode_args)

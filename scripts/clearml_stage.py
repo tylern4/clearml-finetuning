@@ -35,6 +35,9 @@ def main() -> None:
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
                     help="epoch seed offset for resumed chunks")
+    ap.add_argument("--hf-token", type=str, default="",
+                    help="HF token for gated datasets; passed to the code_data stage "
+                         "as HF_TOKEN env (worker \$HOME may not have ~/.hf_token)")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
@@ -74,6 +77,7 @@ def main() -> None:
             "upstream_code": args.upstream_code,
             "resume_train": args.resume_train,
             "epoch_offset": args.epoch_offset,
+            "hf_token": args.hf_token,
             "nproc": int(os.environ.get("NPROC", "4")),
         },
         name="stage",
@@ -163,6 +167,8 @@ def main() -> None:
 
     env = dict(os.environ)
     env["CLEARML_RUN"] = "1"
+    if stage == "code_data" and params.get("hf_token"):
+        env["HF_TOKEN"] = str(params["hf_token"])
     if stage in ("distill", "eval"):
         # avoid the flashinfer JIT sampler (needs ninja + slow first-use compile)
         env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
