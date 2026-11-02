@@ -114,6 +114,7 @@ def main() -> None:
     # tokenize with assistant-only loss mask; fall back to masking the
     # assistant suffix if the chat template lacks generation markers
     def tokenize(msgs):
+        ids, mask = None, None
         try:
             out = tok.apply_chat_template(
                 msgs, tokenize=True, add_generation_prompt=False,
@@ -122,9 +123,18 @@ def main() -> None:
             ids = out["input_ids"]
             mask = out["assistant_masks"]
         except Exception:
+            pass
+        if not ids or not any(mask):
+            # The chat template lacks {% generation %} markers, so
+            # return_assistant_tokens_mask silently returns an all-zero mask
+            # (which would make the loss NaN via 0/0). Fall back to masking
+            # everything before the final assistant turn.
             prompt_ids = tok.apply_chat_template(
-                msgs[:-1], tokenize=True, add_generation_prompt=True)
-            full_ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False)
+                msgs[:-1], tokenize=True, add_generation_prompt=True,
+                return_dict=True)["input_ids"]
+            full_ids = tok.apply_chat_template(
+                msgs, tokenize=True, add_generation_prompt=False,
+                return_dict=True)["input_ids"]
             ids = full_ids
             mask = [0] * len(prompt_ids) + [1] * max(0, len(full_ids) - len(prompt_ids))
         labels = [t if m == 1 else -100 for t, m in zip(ids, mask)]
