@@ -29,7 +29,7 @@ def main() -> None:
                      "Qwen/Qwen3.8-27B"))
     ap.add_argument("--max-rows", type=int, default=0,
                     help="cap on problems to solve; 0 = all rows in code_train.jsonl")
-    ap.add_argument("--max-model-len", type=int, default=8192)
+    ap.add_argument("--max-model-len", type=int, default=16384)
     ap.add_argument("--temperature", type=float, default=0.3)
     ap.add_argument("--max-tokens", type=int, default=2400)
     ap.add_argument("--out-dir", default="code_distilled")
@@ -79,16 +79,49 @@ def main() -> None:
             return tok.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True)
 
-    # prompt = every message except the reference final assistant answer
+    # prompt = every message except the reference final assistant answer,
+    # trimmed to fit the model context (SWE-chat rows carry up to 8 x 4k-char
+    # messages and otherwise blow past max_model_len, killing the engine)
+    budget = args.max_model_len - args.max_tokens - 64
+
+    def ntok(messages):
+        return len(tok(chat(messages), add_special_tokens=False)["input_ids"])
+
+    def fit_messages(messages):
+        """Trim until the templated prompt fits the token budget; None = unsalvageable."""
+        messages = [dict(m) for m in messages]
+        while len(messages) > 2 and ntok(messages) > budget:
+            # drop the oldest non-system turn
+            del messages[1 if messages[0]["role"] == "system" else 0]
+        if ntok(messages) <= budget:
+            return messages
+        # only [system?, user] left and still too long: truncate the user text
+        room = budget - (ntok(messages) - len(tok(messages[-1]["content"],
+                                                     add_special_tokens=False)["input_ids"]))
+        if room <= 0:
+            return None
+        ids = tok(messages[-1]["content"], add_special_tokens=False)["input_ids"]
+        messages[-1]["content"] = tok.decode(ids[:room]) + "\n... [truncated]"
+        return messages if ntok(messages) <= budget else None
+
     prompts, kept_rows = [], []
+    n_trim, n_drop = 0, 0
     for r in rows:
         msgs = r["messages"]
         if msgs and msgs[-1]["role"] == "assistant":
             msgs = msgs[:-1]
         if not any(m["role"] == "user" for m in msgs):
             continue
-        prompts.append(msgs)
+        fitted = fit_messages(msgs)
+        if not fitted:
+            n_drop += 1
+            continue
+        if len(fitted) != len(msgs) or fitted[-1]["content"] != msgs[-1]["content"]:
+            n_trim += 1
+        prompts.append(fitted)
         kept_rows.append(r)
+    print(f"prompts: {len(prompts)} usable, {n_trim} context-trimmed, "
+          f"{n_drop} dropped (budget {budget} tokens)")
 
     sp = SamplingParams(temperature=args.temperature, top_p=0.95,
                         max_tokens=args.max_tokens)
@@ -113,6 +146,8 @@ def main() -> None:
 
     if run:
         run.log({"code_distill/problems": len(kept_rows),
+                 "code_distill/trimmed": n_trim,
+                 "code_distill/dropped": n_drop,
                  "code_distill/solved": len(out_rows),
                  "code_distill/empty": n_empty}, step=0)
         from pathlib import Path
