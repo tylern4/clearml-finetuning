@@ -93,7 +93,7 @@ def main() -> None:
 
     def fit_messages(messages):
         """Trim until the templated prompt fits the token budget; None = unsalvageable."""
-        messages = [dict(m) for m in messages]
+        messages = data.normalize_messages([dict(m) for m in messages])
         while len(messages) > 2 and ntok(messages) > budget:
             # drop the oldest non-system turn
             del messages[1 if messages[0]["role"] == "system" else 0]
@@ -115,7 +115,13 @@ def main() -> None:
             msgs = msgs[:-1]
         if not any(m["role"] == "user" for m in msgs):
             continue
-        fitted = fit_messages(msgs)
+        try:
+            fitted = fit_messages(msgs)
+        except Exception as e:
+            # one malformed row must not kill the stage
+            logp(f"row {len(prompts)} unusable ({type(e).__name__}: {e}); skipped")
+            n_drop += 1
+            continue
         if not fitted:
             n_drop += 1
             continue

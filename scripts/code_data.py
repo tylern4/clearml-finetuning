@@ -67,7 +67,10 @@ def msg_row(system, messages, meta):
     if len(messages) < 2 or messages[-1]["role"] != "assistant" \
             or not any(m["role"] == "user" for m in messages):
         return None
-    return {"messages": [{"role": "system", "content": system}] + messages,
+    # sources like cyber-security carry their own system turns; a second
+    # system message breaks Qwen-style chat templates, so normalize
+    return {"messages": data.normalize_messages(
+                [{"role": "system", "content": system}] + messages),
             "meta": meta}
 
 

@@ -124,7 +124,7 @@ def main() -> None:
                        ".scicode.ready", target_file=scicode_train)
     if os.path.exists(scicode_train):
         scicode_rows = data.read_jsonl(scicode_train)
-        sft_rows += [r["messages"] for r in scicode_rows]
+        sft_rows += [data.normalize_messages(r["messages"]) for r in scicode_rows]
         n_scicode = len(scicode_rows)
 
     # ---- optional extra code-domain mix-in (bigcodebench / terminal-bench /
@@ -136,7 +136,7 @@ def main() -> None:
                        ".code.ready", target_file=code_train)
     if os.path.exists(code_train):
         code_rows = data.read_jsonl(code_train)
-        sft_rows += [r["messages"] for r in code_rows]
+        sft_rows += [data.normalize_messages(r["messages"]) for r in code_rows]
         n_code = len(code_rows)
 
     # ---- optional teacher-solved mix-in (code_distill stage: the teacher's own
@@ -148,7 +148,7 @@ def main() -> None:
                        args.code_distill_dir, ".cdist.ready", target_file=cdist_train)
     if os.path.exists(cdist_train):
         cdist_rows = data.read_jsonl(cdist_train)
-        sft_rows += [r["messages"] for r in cdist_rows]
+        sft_rows += [data.normalize_messages(r["messages"]) for r in cdist_rows]
         n_cdist = len(cdist_rows)
 
     # ---- optional resume from a previous train job's adapter ----------------

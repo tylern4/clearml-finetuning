@@ -151,15 +151,22 @@ def get_scalar(task_id: str, metric: str):
 
 
 def run_code_distill(args, ids) -> None:
-    """Teacher-solve the code_data problems; a mix-in, so failure is non-fatal."""
+    """Teacher-solve the code_data problems. Retry once, then abort: the
+    teacher-solved mix-in is a hard requirement for this run, and silently
+    training without it would waste hours of GPU on the wrong dataset."""
     code_id = ids.get("code_data", args.upstream_code)
-    tid, st = try_stage("code_distill", ["--stage", "code_distill",
-                                         "--upstream-code", code_id])
-    if st != "completed":
-        print(f"  WARNING: code_distill failed ({st}); continuing without the "
-              f"teacher-solved mix-in (raw code data is still used)")
-        return
-    ids["code_distill"] = tid
+    for attempt in (1, 2):
+        tid, st = try_stage("code_distill", ["--stage", "code_distill",
+                                             "--upstream-code", code_id])
+        if st == "completed":
+            ids["code_distill"] = tid
+            return
+        print(f"  WARNING: code_distill attempt {attempt} failed ({st})")
+        if attempt == 1:
+            print("  retrying code_distill once...")
+    raise RuntimeError("code_distill failed twice; the teacher-solved mix-in "
+                       "is required — fix the stage and relaunch from "
+                       "code_distill (upstream tasks are reused)")
 
 
 def supervised_train(args, ids) -> None:

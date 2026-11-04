@@ -145,6 +145,28 @@ def read_jsonl(path):
     return rows
 
 
+def normalize_messages(messages):
+    """Enforce chat-template invariants: at most one system message, in slot 0.
+
+    Some sources (e.g. cyber-security conversations) carry their own system
+    turns; msg_row/converters prepend another one, and Qwen-style templates
+    reject any system message that is not the very first message ("System
+    message must be at the beginning"). Later system turns are demoted to
+    user turns, merged into an adjacent user turn when possible.
+    """
+    out = []
+    for m in messages:
+        if m.get("role") == "system" and out:
+            content = m.get("content", "")
+            if out[-1].get("role") == "user":
+                out[-1]["content"] += "\n\n[context]\n" + content
+            else:
+                out.append({"role": "user", "content": "[context]\n" + content})
+            continue
+        out.append(m)
+    return out
+
+
 def build_sft_rows(rows, system_prompt):
     """Convert distilled transcript rows into multi-turn chat training rows.
 
