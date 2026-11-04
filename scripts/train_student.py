@@ -51,7 +51,9 @@ def ckpt_step_from_artifact(task_id):
 
         art = (Task.get_task(task_id=task_id).artifacts or {}) \
             .get("student-adapter-ckpt")
-        m = re.search(r"ckpt-step(\d+)", getattr(art, "uri", "") or "")
+        # SDK Artifact exposes .url (older builds: .uri)
+        url = getattr(art, "url", None) or getattr(art, "uri", "") or ""
+        m = re.search(r"ckpt-step(\d+)", url)
         return int(m.group(1)) if m else 0
     except Exception:
         return 0
@@ -337,10 +339,13 @@ def main() -> None:
                         "gate_proj", "up_proj", "down_proj"],
     )
     if resume_dir:
-        # continue training the previous job's LoRA weights on the fresh base
+        # continue training the previous job's LoRA weights on the fresh base;
+        # is_trainable=True is required — from_pretrained defaults to an
+        # inference-only load (requires_grad=False on every adapter param,
+        # which DDP then refuses to wrap)
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, resume_dir)
+        model = PeftModel.from_pretrained(model, resume_dir, is_trainable=True)
         if master:
             print(f"resumed LoRA weights from {resume_dir}")
     else:
