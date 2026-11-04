@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import timedelta
@@ -21,6 +22,39 @@ import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
 
 from clearml_finetuning import cml, data  # noqa: E402
+
+
+def ckpt_global_step(resume_dir):
+    """Optimizer step recorded in a resumed periodic checkpoint, or 0.
+
+    Checkpoints write resume_meta.json at save time so a resumed job can
+    fast-forward the data schedule instead of replaying already-trained
+    steps (which would hit the Slurm wall cap at the same point forever).
+    Final adapters never carry a root-level resume_meta.json (any ckpt-*
+    dirs inside them are subdirectories), so a missing meta means 0.
+    """
+    meta = os.path.join(resume_dir, "resume_meta.json")
+    if os.path.exists(meta):
+        try:
+            with open(meta) as f:
+                return int(json.load(f).get("global_step", 0))
+        except Exception:
+            pass
+    return 0
+
+
+def ckpt_step_from_artifact(task_id):
+    """Legacy fallback: recover the checkpoint step from the artifact file
+    name (student-adapter-ckpt/ckpt-stepNNN.zip) of a pre-meta checkpoint."""
+    try:
+        from clearml import Task
+
+        art = (Task.get_task(task_id=task_id).artifacts or {}) \
+            .get("student-adapter-ckpt")
+        m = re.search(r"ckpt-step(\d+)", getattr(art, "uri", "") or "")
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
 
 
 def main() -> None:
@@ -97,7 +131,14 @@ def main() -> None:
             os.makedirs(dest_dir, exist_ok=True)
             if os.path.isdir(local):
                 for f in os.listdir(local):
-                    shutil.copy(os.path.join(local, f), dest_dir)
+                    src = os.path.join(local, f)
+                    dst = os.path.join(dest_dir, f)
+                    if os.path.isdir(src):
+                        # final adapter artifacts embed their periodic
+                        # ckpt-stepNNN subdirs; copy them recursively
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                    else:
+                        shutil.copy(src, dst)
             else:
                 shutil.copy(local, target_file or os.path.join(dest_dir, os.path.basename(local)))
             open(ready, "w").close()
@@ -153,8 +194,10 @@ def main() -> None:
 
     # ---- optional resume from a previous train job's adapter ----------------
     resume_dir = ""
+    ff_step = 0
     if args.resume_task:
         adapter_marker = os.path.join(args.resume_dir, "adapter_config.json")
+        resumed_ckpt = False
         if not os.path.exists(adapter_marker):
             try:
                 fetch_upstream(args.resume_task, "student-adapter", args.resume_dir,
@@ -167,10 +210,15 @@ def main() -> None:
                           f"resuming from latest student-adapter-ckpt")
                 fetch_upstream(args.resume_task, "student-adapter-ckpt",
                                args.resume_dir, ".resume.ready")
+                resumed_ckpt = True
         if os.path.exists(adapter_marker):
             resume_dir = args.resume_dir
+            ff_step = ckpt_global_step(resume_dir)
+            if resumed_ckpt and ff_step == 0:
+                ff_step = ckpt_step_from_artifact(args.resume_task)
     if master:
-        print(f"resume adapter: {resume_dir or 'none (fresh LoRA)'}")
+        print(f"resume adapter: {resume_dir or 'none (fresh LoRA)'}"
+              + (f" (fast-forward to step {ff_step})" if ff_step else ""))
     if master:
         print(f"loaded {len(sft_rows)} training rows "
               f"({len(sft_rows) - n_scicode - n_code - n_cdist} agent + {n_scicode} scicode "
@@ -344,6 +392,10 @@ def main() -> None:
     accum_loss = 0.0
     model.train()
     stop = False
+    if ff_step and master:
+        print(f"fast-forward: replaying the data schedule through step {ff_step} "
+              f"(already trained in the resumed checkpoint) before training",
+              flush=True)
     for epoch in range(args.epochs):
         rng = torch.Generator().manual_seed(1234 + epoch + args.epoch_offset)
         order = torch.randperm(len(all_mb), generator=rng).tolist()
@@ -352,6 +404,17 @@ def main() -> None:
         micro_batches = [all_mb[i] for i in order][rank::world]
         opt.zero_grad(set_to_none=True)
         for mi, mb in enumerate(micro_batches):
+            boundary = (mi + 1) % args.grad_accum == 0 or mi == len(micro_batches) - 1
+            if step < ff_step:
+                # fast-forward: this job resumes a killed chunk's checkpoint;
+                # the data order is deterministic (same seed + epoch_offset),
+                # so replaying the schedule without forward/backward/optimizer
+                # work keeps the remaining steps aligned with the killed run
+                if boundary:
+                    step += 1
+                    if master and step % 20 == 0:
+                        print(f"fast-forward {step}/{ff_step}", flush=True)
+                continue
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
             out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
@@ -367,7 +430,7 @@ def main() -> None:
             loss.backward()
             accum_loss += loss.item()
             tokens_seen += int(attn.sum().item())
-            if (mi + 1) % args.grad_accum == 0 or mi == len(micro_batches) - 1:
+            if boundary:
                 for g in opt.param_groups:
                     g["lr"] = lr_at(step)
                 total_norm = torch.nn.utils.clip_grad_norm_(params, 1.0)
@@ -393,12 +456,18 @@ def main() -> None:
                 step += 1
                 # periodic checkpoint: saved locally + uploaded as an artifact so
                 # it survives an 8h-cap kill; a later job resumes via --resume-task
-                if args.save_every and step % args.save_every == 0:
+                if args.save_every and step % args.save_every == 0 and step > ff_step:
                     if master:
                         ckpt = os.path.join(args.out_dir, f"ckpt-step{step}")
                         os.makedirs(ckpt, exist_ok=True)
                         (model.module if hasattr(model, "module") else model).save_pretrained(ckpt)
                         tok.save_pretrained(ckpt)
+                        # tells a resumed job how far to fast-forward its data
+                        # schedule (see ckpt_global_step)
+                        with open(os.path.join(ckpt, "resume_meta.json"), "w") as mf:
+                            json.dump({"global_step": step,
+                                       "epoch_offset": args.epoch_offset,
+                                       "epochs": args.epochs}, mf)
                         if run:
                             from pathlib import Path
                             run.task.upload_artifact(
