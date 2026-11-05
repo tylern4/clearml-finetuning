@@ -45,13 +45,13 @@ def main() -> None:
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
-        "CML_STUDENT", "Qwen/Qwen3.5-9B"))
+        "CML_STUDENT", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--n-tasks", type=int, default=1200)
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--lora-r", type=int, default=32)
     ap.add_argument("--humaneval-n", type=int, default=0)
     ap.add_argument("--student-quant", default=os.environ.get(
-        "CML_STUDENT_QUANT", "none"),
+        "CML_STUDENT_QUANT", "4bit"),
         help="none|8bit|4bit quantized base for large students")
     args, _ = ap.parse_known_args()
 
@@ -156,7 +156,7 @@ def main() -> None:
         cmd = [py, "-m", "torch.distributed.run", "--standalone",
                "--nproc_per_node", str(nproc), script,
                "--student", str(params["student"]),
-               "--student-quant", str(params.get("student_quant") or "none"),
+               "--student-quant", str(params.get("student_quant") or "4bit"),
                "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--code-task", str(params["upstream_code"]),

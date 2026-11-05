@@ -73,7 +73,7 @@ def load_humaneval(attempts=3):
 def main() -> None:
     ap = argparse.ArgumentParser(description="evaluate student")
     ap.add_argument("--student", default=os.environ.get("CML_STUDENT",
-                    "Qwen/Qwen3.5-9B"))
+                    "Qwen/Qwen3.8-27B"))
     ap.add_argument("--adapter-task", type=str, default="", help="upstream train task id")
     ap.add_argument("--adapter-dir", type=str, default="student_adapter")
     ap.add_argument("--data-task", type=str, default="", help="upstream distill task id (for val rows)")

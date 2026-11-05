@@ -73,7 +73,7 @@ def ckpt_step_from_artifact(task_id):
 def main() -> None:
     ap = argparse.ArgumentParser(description="LoRA SFT training")
     ap.add_argument("--student", default=os.environ.get("CML_STUDENT",
-                    "Qwen/Qwen3.5-9B"))
+                    "Qwen/Qwen3.8-27B"))
     ap.add_argument("--data-task", type=str, default="", help="upstream distill task id")
     ap.add_argument("--data-dir", type=str, default="distilled", help="local data dir if already present")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
@@ -95,7 +95,7 @@ def main() -> None:
     ap.add_argument("--epoch-offset", type=int, default=0,
                     help="added to the epoch seed when resuming (chunked multi-job training)")
     ap.add_argument("--student-quant", default=os.environ.get(
-        "CML_STUDENT_QUANT", "none"),
+        "CML_STUDENT_QUANT", "4bit"),
         help="none|8bit|4bit: quantize the frozen base so a large student fits "
              "a 40GB GPU under DDP (LoRA adapters stay bf16)")
     ap.add_argument("--lora-r", type=int, default=32)
