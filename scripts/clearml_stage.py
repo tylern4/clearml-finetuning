@@ -181,10 +181,24 @@ def main() -> None:
     if stage in ("distill", "code_distill", "eval"):
         # avoid the flashinfer JIT sampler (needs ninja + slow first-use compile)
         env.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+    log_dir = os.environ.get("CML_STAGE_LOG_DIR",
+                             "/pscratch/sd/t/tylern/scratch/clearml/stage_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    stage_log = os.path.join(log_dir, f"{task.id}_{stage}.log")
     print(f"+ {' '.join(cmd)}")
-    proc = subprocess.run(cmd, env=env)
-    if proc.returncode != 0:
-        raise RuntimeError(f"stage '{stage}' script failed with exit code {proc.returncode}")
+    print(f"  stage log: {stage_log}")
+    with open(stage_log, "w") as lf:
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in proc.stdout:
+            lf.write(line)
+            lf.flush()
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"stage '{stage}' script failed with exit code {rc}; "
+                           f"full log: {stage_log}")
     print(f"stage '{stage}' complete")
 
 
