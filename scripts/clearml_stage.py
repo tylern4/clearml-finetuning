@@ -128,8 +128,6 @@ def main() -> None:
     if stage not in STAGES:
         raise RuntimeError(f"missing/invalid stage parameter: {stage!r}")
 
-    import subprocess
-
     py = sys.executable
     script = {
         "distill": "scripts/distill_data.py",
