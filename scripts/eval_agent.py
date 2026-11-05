@@ -306,6 +306,87 @@ def _extract_code(text):
     return text.strip()
 
 
+def _report_eval_plots(run, problems, step_pass, main_pass, n_sub_pass, n_sub):
+    """Purpose-built eval figures for the task's Plots tab (latest-wins cards)."""
+    if not run:
+        return
+    try:
+        import time
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        # headline rates vs the gate
+        rows = [("SciCode main (gate)", main_pass / max(1, len(problems))),
+                ("SciCode sub-step", (n_sub_pass / n_sub) if n_sub else 0.0)]
+        for key, label in (("eval/pass1", "HumanEval"),
+                           ("eval/format_adherence", "traj adherence")):
+            pts = run._history.get(key) or []
+            if pts:
+                rows.append((label, pts[-1][1]))
+        fig, ax = plt.subplots(figsize=(8, 3.6))
+        bars = ax.barh([r[0] for r in rows][::-1],
+                       [100 * r[1] for r in rows][::-1], color="#4878cf")
+        ax.bar_label(bars, fmt="%.1f%%", padding=3, fontsize=9)
+        ax.axvline(15, color="crimson", ls="--", lw=1)
+        ax.text(15.5, len(rows) - 1.1, "gate 15%", color="crimson", fontsize=8)
+        ax.set_xlim(0, 105)
+        ax.set_xlabel("pass rate (%)")
+        fig.tight_layout()
+        run.report_figure("eval_summary", fig)
+
+        # per-problem resolved fraction (where the model struggles)
+        frac = []
+        for p in problems:
+            n = len(p["sub_steps"])
+            ok = sum(1 for j in range(n) if step_pass.get((p["problem_id"], j)))
+            frac.append((p.get("problem_name") or p["problem_id"], ok / n,
+                         ok == n))
+        frac.sort(key=lambda t: t[1])
+        fig, ax = plt.subplots(figsize=(9, max(6, 0.16 * len(frac) + 1)))
+        ax.barh([t[0][:30] for t in frac], [100 * t[1] for t in frac],
+                color=["#2ca02c" if t[2] else "#4878cf" for t in frac])
+        ax.set_xlim(0, 100)
+        ax.set_xlabel("sub-steps passed (%)  ·  green = fully resolved")
+        ax.set_title(f"SciCode per-problem ({main_pass}/{len(problems)} resolved)")
+        fig.tight_layout()
+        run.report_figure("scicode_per_problem", fig, step=1)
+
+        # pass rate by position in the sequential sub-step chain
+        by_step = {}
+        for p in problems:
+            for j in range(len(p["sub_steps"])):
+                by_step.setdefault(j, []).append(
+                    bool(step_pass.get((p["problem_id"], j))))
+        if by_step:
+            js = sorted(by_step)
+            rates = [100 * sum(by_step[j]) / len(by_step[j]) for j in js]
+            fig, ax = plt.subplots(figsize=(7, 4))
+            ax.bar([j + 1 for j in js], rates, color="#4878cf")
+            for j, r in zip(js, rates):
+                ax.text(j + 1, r + 1.5, f"{r:.0f}%\nn={len(by_step[j])}",
+                        ha="center", fontsize=8)
+            ax.set_ylim(0, 108)
+            ax.set_xticks([j + 1 for j in js])
+            ax.set_xlabel("sub-step position (sequential generation)")
+            ax.set_ylabel("pass rate (%)")
+            ax.set_title("SciCode pass rate by sub-step position")
+            fig.tight_layout()
+            run.report_figure("scicode_by_step", fig, step=2)
+    except Exception as ex:
+        print(f"[eval] warning: plot reporting failed: {ex}")
+    finally:
+        # figure conversion/upload trails by seconds; settle before the
+        # stage runner exits the process
+        try:
+            run.task.flush()
+            time.sleep(3)
+        except Exception:
+            pass
+
+
 def run_scicode_eval(args, run, llm, tok, lora_req):
     import shutil
     import tempfile
@@ -432,6 +513,7 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
                                           iteration=3)
     except Exception as _ex:
         print(f"[eval] warning: durable result upload failed: {_ex}")
+    _report_eval_plots(run, problems, step_pass, main_pass, n_sub_pass, n_sub)
     if run:
         run.log({"eval/scicode_sub_pass1": n_sub_pass / n_sub,
                  "eval/scicode_sub_passed": n_sub_pass, "eval/scicode_sub_total": n_sub,

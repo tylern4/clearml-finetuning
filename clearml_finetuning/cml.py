@@ -6,6 +6,7 @@ as debug samples, and emits a multi-panel summary figure on finish().
 """
 
 import os
+import time
 
 _TERMINAL = {"completed", "failed", "stopped", "closed", "published"}
 
@@ -141,28 +142,37 @@ class ClearMLRun:
         ]
         fig, axes = plt.subplots(2, 2, figsize=(11, 7))
         fig.suptitle(title)
-        plotted = False
+        used = set()
         for ax, panel in zip(axes.flat, panels):
             for key, label, mode in panel:
                 xs, ys = series(key)
                 if not xs:
                     continue
-                plotted = True
+                used.add(id(ax))
                 if mode == "tw":
                     ax2 = ax.twinx()
                     ax2.plot(xs, ys, color="tab:orange", alpha=0.85, label=label)
                     ax2.set_ylabel(label, color="tab:orange")
                 else:
                     ax.plot(xs, ys, label=label)
-            if ax.get_lines():
+            labeled = [l for l in ax.get_lines()
+                       if l.get_label() and not l.get_label().startswith("_")]
+            if labeled:
                 ax.legend(loc="best", fontsize=8)
             ax.set_xlabel("step")
-        if plotted:
+        for ax in axes.flat:  # drop empty panels instead of blank grids
+            if id(ax) not in used:
+                fig.delaxes(ax)
+        if used:
             try:
                 self._logger.report_matplotlib_figure(
                     title=title, series=series_name, figure=fig,
                     iteration=iteration,
                 )
+                # PNG conversion/upload trails the call by seconds; settle
+                # so a soon-exiting process can't drop the event
+                self.task.flush()
+                time.sleep(1)
             except Exception as ex:
                 print(f"[clearml] warning: failed reporting plot {title}: {ex}")
         plt.close(fig)
@@ -171,6 +181,24 @@ class ClearMLRun:
         """Mid-run plot refresh; the UI Plots tab sliders across iterations."""
         self._render_and_report("progress", "curves",
                                 int(step) if step is not None else 0)
+
+    def report_figure(self, title, fig, step=None):
+        """Report a caller-built matplotlib figure (latest-wins per title)."""
+        try:
+            self._logger.report_matplotlib_figure(
+                title=title, series="plot", figure=fig,
+                iteration=int(step) if step is not None else 0)
+            # settle: conversion/upload trails the call by seconds
+            self.task.flush()
+            time.sleep(1)
+        except Exception as ex:
+            print(f"[clearml] warning: failed reporting figure {title}: {ex}")
+        finally:
+            try:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+            except Exception:
+                pass
 
     def _report_summary_plots(self):
         last_step = max((pts[-1][0] for pts in self._history.values() if pts),
@@ -182,6 +210,9 @@ class ClearMLRun:
         # do not close the task: a wrapping stage runner may still need to
         # upload artifacts after this process exits
         self.task.flush()
+        # the summary figure's conversion/upload trails by seconds; give it
+        # time so a promptly-exiting process doesn't drop it
+        time.sleep(2)
 
 
 def get_run_logger(run_name=None, config=None, project=None,
