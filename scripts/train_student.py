@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import signal
 import sys
 import time
 from datetime import timedelta
@@ -22,6 +23,16 @@ import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
 
 from clearml_finetuning import cml, data  # noqa: E402
+
+
+# Slurm sends SIGTERM at walltime (SIGKILL follows after KillDelay). The
+# training loop only ACTS on this flag at optimizer boundaries, so a
+# checkpoint save is never interrupted mid-write.
+_stop = {"flag": False}
+
+
+def _on_sigterm(signum, frame):
+    _stop["flag"] = True
 
 
 def ckpt_global_step(resume_dir):
@@ -109,6 +120,8 @@ def main() -> None:
     else:
         rank, world, local = 0, 1, 0
     master = rank == 0
+    # exit cleanly on the Slurm walltime SIGTERM (see the boundary stop-check)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     run = cml.get_run_logger("train", vars(args)) if master else None
     torch.cuda.set_device(local) if torch.cuda.is_available() else None
     device = torch.device(f"cuda:{local}" if torch.cuda.is_available() else "cpu")
@@ -403,6 +416,26 @@ def main() -> None:
         t = (step - args.warmup) / max(1, total_steps - args.warmup)
         return args.lr * 0.5 * (1 + math.cos(math.pi * min(1.0, t)))
 
+    def save_ckpt(step_now):
+        """Master-side checkpoint at an optimizer boundary: adapter + schedule
+        metadata, uploaded as the student-adapter-ckpt artifact (the
+        supervisor's continuation source when the 8h wall kills the job)."""
+        ckpt = os.path.join(args.out_dir, f"ckpt-step{step_now}")
+        os.makedirs(ckpt, exist_ok=True)
+        (model.module if hasattr(model, "module") else model).save_pretrained(ckpt)
+        tok.save_pretrained(ckpt)
+        # tells a resumed job how far to fast-forward its data
+        # schedule (see ckpt_global_step)
+        with open(os.path.join(ckpt, "resume_meta.json"), "w") as mf:
+            json.dump({"global_step": step_now,
+                       "epoch_offset": args.epoch_offset,
+                       "epochs": args.epochs}, mf)
+        if run:
+            from pathlib import Path
+            run.task.upload_artifact(
+                "student-adapter-ckpt", Path(ckpt), wait_on_upload=True)
+        print(f"saved checkpoint at step {step_now} -> {ckpt}", flush=True)
+
     run_logger = run.task.get_logger() if run else None
     step, t0, tokens_seen = 0, time.time(), 0
     accum_loss = 0.0
@@ -426,6 +459,15 @@ def main() -> None:
                 # the data order is deterministic (same seed + epoch_offset),
                 # so replaying the schedule without forward/backward/optimizer
                 # work keeps the remaining steps aligned with the killed run
+                if _stop["flag"]:
+                    # Slurm walltime during fast-forward: no compute has run
+                    # since the resumed-from checkpoint, so that checkpoint is
+                    # still current -- exit 0 WITHOUT saving (a fresh adapter
+                    # here would claim "done" while having trained nothing).
+                    # Collective-free: every rank got the same SIGTERM and
+                    # leaves on its own; the epoch barrier below re-syncs us.
+                    stop = True
+                    break
                 if boundary:
                     step += 1
                     if master and step % 20 == 0:
@@ -472,27 +514,53 @@ def main() -> None:
                 step += 1
                 # periodic checkpoint: saved locally + uploaded as an artifact so
                 # it survives an 8h-cap kill; a later job resumes via --resume-task
+                saved_here = False
                 if args.save_every and step % args.save_every == 0 and step > ff_step:
                     if master:
-                        ckpt = os.path.join(args.out_dir, f"ckpt-step{step}")
-                        os.makedirs(ckpt, exist_ok=True)
-                        (model.module if hasattr(model, "module") else model).save_pretrained(ckpt)
-                        tok.save_pretrained(ckpt)
-                        # tells a resumed job how far to fast-forward its data
-                        # schedule (see ckpt_global_step)
-                        with open(os.path.join(ckpt, "resume_meta.json"), "w") as mf:
-                            json.dump({"global_step": step,
-                                       "epoch_offset": args.epoch_offset,
-                                       "epochs": args.epochs}, mf)
-                        if run:
-                            from pathlib import Path
-                            run.task.upload_artifact(
-                                "student-adapter-ckpt", Path(ckpt), wait_on_upload=True)
-                        print(f"saved checkpoint at step {step} -> {ckpt}", flush=True)
+                        save_ckpt(step)
+                    saved_here = True
                     if is_ddp:
                         dist.barrier()
+                # walltime stop-check, agreed by ALL ranks: Slurm SIGTERMs every
+                # rank together, and the all_reduce turns that into one shared
+                # decision so no rank trains on while another saves (NCCL hang)
+                if is_ddp:
+                    stop_t = torch.tensor([1 if _stop["flag"] else 0],
+                                          device=device, dtype=torch.int32)
+                    dist.all_reduce(stop_t, op=dist.ReduceOp.MAX)
+                    hit_stop = bool(stop_t.item())
+                else:
+                    hit_stop = _stop["flag"]
+                if hit_stop:
+                    if master and step > ff_step and not saved_here:
+                        save_ckpt(step)
+                    if is_ddp:
+                        dist.barrier()
+                    if master:
+                        print(f"walltime SIGTERM at step {step}: saved "
+                              f"continuation checkpoint, exiting cleanly",
+                              flush=True)
+                    if is_ddp:
+                        dist.destroy_process_group()
+                    if run:
+                        run.finish()
+                    return
         if is_ddp:
             dist.barrier()
+        if stop:
+            break
+
+    if stop:
+        # walltime hit during fast-forward (see the ff-region stop check):
+        # nothing new was trained, so finalize without saving or uploading
+        if master:
+            print("walltime SIGTERM during fast-forward: the resumed-from "
+                  "checkpoint is current; exiting without saving", flush=True)
+        if is_ddp:
+            dist.destroy_process_group()
+        if run:
+            run.finish()
+        return
 
     if master:
         os.makedirs(args.out_dir, exist_ok=True)

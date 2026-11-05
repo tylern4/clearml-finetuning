@@ -150,6 +150,65 @@ def get_scalar(task_id: str, metric: str):
     return None
 
 
+def clearml_api(endpoint: str, body: dict):
+    """POST to the ClearML API with creds from the environment (the supervisor
+    launch sources clearml-finetuning/.env; nothing is hardcoded here)."""
+    import base64
+    import json
+    import urllib.request
+
+    host = os.environ.get("CLEARML_API_HOST", "")
+    key = os.environ.get("CLEARML_API_ACCESS_KEY", "")
+    secret = os.environ.get("CLEARML_API_SECRET_KEY", "")
+    if not (host and key and secret):
+        print("  clearml_api: CLEARML_API_* not set (source .env); skipping")
+        return None
+    auth = base64.b64encode(f"{key}:{secret}".encode()).decode()
+    req = urllib.request.Request(
+        host + "/" + endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": "Basic " + auth,
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def task_artifact_names(task_id: str) -> set:
+    """Names of the artifacts a task uploaded (empty set on any error)."""
+    from clearml import Task
+
+    try:
+        return set(Task.get_task(task_id=task_id).artifacts or {})
+    except Exception as e:
+        print(f"  task_artifact_names({task_id}) failed: {e}")
+        return set()
+
+
+def mark_partial(task_id: str) -> bool:
+    """Mark a walltime-killed train chunk completed + walltime-partial.
+
+    A chunk that trained until the 8h Slurm wall and saved a continuation
+    checkpoint did its job for this window; the supervisor resumes from that
+    checkpoint, so the task should read completed, not failed. Best-effort:
+    returns False (with a warning) if the flip didn't take."""
+    try:
+        from clearml import Task
+        Task.get_task(task_id=task_id).add_tags(["walltime-partial"])
+    except Exception as e:
+        print(f"  add_tags({task_id}) failed: {e}")
+    try:
+        r = clearml_api("v2.13/tasks.edit", {
+            "task": task_id, "status": "completed", "force": True,
+            "status_reason": "8h Slurm walltime; partial chunk, continued by a later chunk",
+        })
+        if r and r.get("meta", {}).get("result_code") == 200:
+            return True
+    except Exception as e:
+        print(f"  tasks.edit({task_id}) failed: {e}")
+    print(f"  WARNING: could not mark {task_id} completed+walltime-partial")
+    return False
+
+
 def run_code_distill(args, ids) -> None:
     """Teacher-solve the code_data problems. Retry once, then abort: the
     teacher-solved mix-in is a hard requirement for this run, and silently
@@ -193,24 +252,56 @@ def supervised_train(args, ids) -> None:
         scicode_id = ids.get("scicode_data", args.upstream_scicode)
         code_id = ids.get("code_data", args.upstream_code)
         cdistill_id = ids.get("code_distill", args.upstream_code_distill)
-        targs = ["--stage", "train", "--epochs", str(chunk),
-                 "--upstream-distill", distill_id,
-                 "--upstream-scicode", scicode_id,
-                 "--upstream-code", code_id,
-                 "--upstream-code-distill", cdistill_id,
-                 "--resume-train", resume,
-                 "--epoch-offset", str(total)]
         ok = False
-        for attempt in range(args.max_train_retries + 1):
+        attempt = 0
+        partials = 0
+        while attempt <= args.max_train_retries:
+            # rebuild args every attempt: a retry may resume from a different
+            # task than the previous attempt (never the dead chunk itself)
+            targs = ["--stage", "train", "--epochs", str(chunk),
+                     "--upstream-distill", distill_id,
+                     "--upstream-scicode", scicode_id,
+                     "--upstream-code", code_id,
+                     "--upstream-code-distill", cdistill_id,
+                     "--resume-train", resume,
+                     "--epoch-offset", str(total)]
             tid, st = try_stage("train", targs)
-            if st == "completed":
+            arts = task_artifact_names(tid)
+            if "student-adapter" in arts:
+                # chunk finished its epochs and uploaded the final adapter
                 ids["train"] = tid
                 resume = tid
                 ok = True
                 break
-            print(f"  train chunk failed ({st}); attempt {attempt + 1}/"
-                  f"{args.max_train_retries + 1} - will resume from its checkpoint")
-            resume = tid  # resume from the failed chunk's latest ckpt
+            if st == "completed" and "student-adapter-ckpt" in arts:
+                # walltime partial: the chunk trained until the 8h Slurm wall
+                # and saved a continuation checkpoint (the new SIGTERM handler
+                # makes the task read completed natively). Continue the SAME
+                # chunk from that checkpoint; this consumes no retry because
+                # every continuation makes real forward progress.
+                mark_partial(tid)
+                print(f"  train chunk partial at walltime ({tid}); continuing "
+                      f"it from its checkpoint")
+                resume = tid
+                partials += 1
+                if partials > 8:
+                    raise RuntimeError("train chunk hit 8 consecutive walltime "
+                                       "partials without completing; giving up "
+                                       "rather than looping forever")
+                continue
+            if "student-adapter-ckpt" in arts:
+                print(f"  train chunk failed ({st}); attempt {attempt + 1}/"
+                      f"{args.max_train_retries + 1} - will resume from its "
+                      f"checkpoint")
+                resume = tid
+            else:
+                # no artifacts at all: a genuine failure. Never resume the dead
+                # chunk itself (that crash-loops); fall back to the last good
+                # source, or scratch if this was the first chunk.
+                print(f"  train chunk failed ({st}) with no checkpoint; attempt "
+                      f"{attempt + 1}/{args.max_train_retries + 1} - resuming "
+                      f"from last good source {resume or '(scratch)'}")
+            attempt += 1
         if not ok:
             raise RuntimeError("train chunk failed after all retries")
         total += chunk
