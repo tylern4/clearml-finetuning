@@ -418,6 +418,14 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
         _t = _Task.current_task()
         if _t is not None:
             _t.upload_artifact("eval-results", _metrics)
+            _fails = [{"problem": pid, "step": j + 1,
+                       "error": (err or "")[:400],
+                       "generated": (generated.get((pid, j), "") or "")[:1200]}
+                      for pid, j, ok, err in [r for r in results if not r[2]][:20]]
+            if _fails:
+                _t.upload_artifact("scicode-failures", _fails)
+                print(f"[eval] uploaded {len(_fails)} failure records "
+                      f"as artifact 'scicode-failures'")
             _t.get_logger().report_scalar(title="eval",
                                           series="scicode_main_pass1",
                                           value=_metrics["scicode_main_pass1"],
