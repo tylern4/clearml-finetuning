@@ -116,52 +116,66 @@ class ClearMLRun:
             file_extension="txt",
         )
 
-    def _report_summary_plots(self):
-        if not self._history:
-            return
+    def _render_and_report(self, title, series_name, iteration):
+        """Render the metric-panel figure and report it as a plot event."""
         try:
             import matplotlib
 
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
-
-            def series(key):
-                pts = self._history.get(key) or []
-                return [p[0] for p in pts], [p[1] for p in pts]
-
-            panels = [
-                [("train/loss", "train loss", None)],
-                [("train/lr", "lr", None)],
-                [("eval/bpb", "eval loss (bpb)", None), ("eval/pass1", "HumanEval pass@1", None)],
-                [("train/tok_per_sec", "tok/sec", None), ("train/mfu", "MFU %", "tw")],
-            ]
-            fig, axes = plt.subplots(2, 2, figsize=(11, 7))
-            fig.suptitle("training summary")
-            plotted = False
-            for ax, panel in zip(axes.flat, panels):
-                for key, label, mode in panel:
-                    xs, ys = series(key)
-                    if not xs:
-                        continue
-                    plotted = True
-                    if mode == "tw":
-                        ax2 = ax.twinx()
-                        ax2.plot(xs, ys, color="tab:orange", alpha=0.85, label=label)
-                        ax2.set_ylabel(label, color="tab:orange")
-                    else:
-                        ax.plot(xs, ys, label=label)
-                if ax.get_lines():
-                    ax.legend(loc="best", fontsize=8)
-                ax.set_xlabel("step")
-            if plotted:
-                last_step = max((pts[-1][0] for pts in self._history.values() if pts), default=0)
-                self._logger.report_matplotlib_figure(
-                    title="training_summary", series="curves", figure=fig,
-                    iteration=last_step,
-                )
-            plt.close(fig)
         except Exception as ex:
-            print(f"[clearml] warning: failed reporting summary plots: {ex}")
+            print(f"[clearml] warning: matplotlib unavailable: {ex}")
+            return
+        if not self._history:
+            return
+
+        def series(key):
+            pts = self._history.get(key) or []
+            return [p[0] for p in pts], [p[1] for p in pts]
+
+        panels = [
+            [("train/loss", "train loss", None)],
+            [("train/lr", "lr", None)],
+            [("eval/bpb", "eval loss (bpb)", None), ("eval/pass1", "HumanEval pass@1", None)],
+            [("train/tok_per_sec", "tok/sec", None), ("train/mfu", "MFU %", "tw")],
+        ]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 7))
+        fig.suptitle(title)
+        plotted = False
+        for ax, panel in zip(axes.flat, panels):
+            for key, label, mode in panel:
+                xs, ys = series(key)
+                if not xs:
+                    continue
+                plotted = True
+                if mode == "tw":
+                    ax2 = ax.twinx()
+                    ax2.plot(xs, ys, color="tab:orange", alpha=0.85, label=label)
+                    ax2.set_ylabel(label, color="tab:orange")
+                else:
+                    ax.plot(xs, ys, label=label)
+            if ax.get_lines():
+                ax.legend(loc="best", fontsize=8)
+            ax.set_xlabel("step")
+        if plotted:
+            try:
+                self._logger.report_matplotlib_figure(
+                    title=title, series=series_name, figure=fig,
+                    iteration=iteration,
+                )
+            except Exception as ex:
+                print(f"[clearml] warning: failed reporting plot {title}: {ex}")
+        plt.close(fig)
+
+    def report_progress_plot(self, step=None):
+        """Mid-run plot refresh; the UI Plots tab sliders across iterations."""
+        self._render_and_report("progress", "curves",
+                                int(step) if step is not None else 0)
+
+    def _report_summary_plots(self):
+        last_step = max((pts[-1][0] for pts in self._history.values() if pts),
+                        default=0)
+        self._render_and_report("training_summary", "curves", last_step)
 
     def finish(self):
         self._report_summary_plots()

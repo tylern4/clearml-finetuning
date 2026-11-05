@@ -510,6 +510,10 @@ def main() -> None:
                         "train/tok_per_sec": tokens_seen / max(dt, 1e-6),
                         "train/progress_pct": 100 * step / max(1, total_steps),
                     }, step=None)
+                    # mid-run plot refresh, same cadence as checkpoints: the
+                    # UI Plots tab shows a slider across these snapshots
+                    if run_logger and args.save_every and step % args.save_every == 0:
+                        run_logger.report_progress_plot(step=step)
                 accum_loss, tokens_seen = 0.0, 0
                 step += 1
                 # periodic checkpoint: saved locally + uploaded as an artifact so
