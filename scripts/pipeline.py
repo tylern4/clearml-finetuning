@@ -37,7 +37,8 @@ REQUIREMENTS = {
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
               "bitsandbytes>=0.46", "clearml>=2.1", "boto3", "matplotlib"],
     "eval": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88", "peft>=0.17",
-             "h5py", "numpy", "scipy", "clearml>=2.1", "boto3", "matplotlib"],
+             "h5py", "numpy", "scipy", "clearml>=2.1", "boto3", "matplotlib",
+             "# rebuild venv 2026-11-04: poisoned venvs-cache entry lacked vllm"],
     "convert_gguf": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17",
                      "gguf>=0.13", "huggingface_hub", "clearml>=2.1", "boto3", "matplotlib"],
 }
