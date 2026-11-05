@@ -88,8 +88,23 @@ def main() -> None:
     run = cml.get_run_logger("eval", vars(args), task_type="testing")
     cml.prepare_vllm_nvrtc()  # harmless for BF16 students; needed for FP8 checkpoints
 
-    from vllm import LLM
-    from vllm.lora.request import LoRARequest
+    try:
+        from vllm import LLM
+        from vllm.lora.request import LoRARequest
+    except ModuleNotFoundError:
+        # Self-heal: Task.init's requirements auto-capture (a freeze of the
+        # submitting shell's venv, torch-cpu, no vllm) can win the race against
+        # the code-pinned requirements and key a stage venv without vllm.
+        # Install the eval stack into the current venv; pip is idempotent, so
+        # this is a one-time cost per venv and later runs are no-ops.
+        print("[eval] vllm missing in stage venv - installing eval stack", flush=True)
+        subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "torch"],
+                       check=False)
+        subprocess.run([sys.executable, "-m", "pip", "install",
+                        "vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88",
+                        "peft>=0.17", "h5py", "scipy"], check=True)
+        from vllm import LLM
+        from vllm.lora.request import LoRARequest
 
     nproc = int(os.environ.get("NPROC", "4"))
     if args.adapter_task and not os.path.isdir(args.adapter_dir):
