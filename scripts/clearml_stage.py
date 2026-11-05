@@ -175,6 +175,7 @@ def main() -> None:
 
     env = dict(os.environ)
     env["CLEARML_RUN"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"  # stream stage stdout through the agent pipe
     if stage == "code_data" and params.get("hf_token"):
         env["HF_TOKEN"] = str(params["hf_token"])
     if stage in ("distill", "code_distill", "eval"):

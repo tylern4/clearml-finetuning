@@ -388,6 +388,27 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
     print(f"SciCode sub-step pass@1: {n_sub_pass}/{n_sub} = {n_sub_pass / n_sub:.3f}")
     print(f"SciCode main-problem resolved: {main_pass}/{len(problems)} "
           f"= {main_pass / len(problems):.3f}")
+    # Durable result channel: scalar reporting inside the agent can be lost
+    # (SDK reporting thread vs vLLM process spawning) and stage stdout is
+    # block-buffered through the agent pipe. An artifact uploaded via the
+    # current task always survives.
+    _metrics = {"scicode_main_pass1": main_pass / len(problems),
+                "scicode_sub_pass1": (n_sub_pass / n_sub) if n_sub else 0.0,
+                "scicode_main_resolved": main_pass,
+                "scicode_main_total": len(problems),
+                "scicode_sub_passed": n_sub_pass,
+                "scicode_sub_total": n_sub}
+    try:
+        from clearml import Task as _Task
+        _t = _Task.current_task()
+        if _t is not None:
+            _t.upload_artifact("eval-results", _metrics)
+            _t.get_logger().report_scalar(title="eval",
+                                          series="scicode_main_pass1",
+                                          value=_metrics["scicode_main_pass1"],
+                                          iteration=3)
+    except Exception as _ex:
+        print(f"[eval] warning: durable result upload failed: {_ex}")
     if run:
         run.log({"eval/scicode_sub_pass1": n_sub_pass / n_sub,
                  "eval/scicode_sub_passed": n_sub_pass, "eval/scicode_sub_total": n_sub,
