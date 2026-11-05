@@ -218,6 +218,17 @@ def main() -> None:
             ff_step = ckpt_global_step(resume_dir)
             if resumed_ckpt and ff_step == 0:
                 ff_step = ckpt_step_from_artifact(args.resume_task)
+    # ff_step must be identical on every rank: only the master rank can take
+    # the RuntimeError fallback above (non-master ranks never raise from
+    # fetch_upstream -- they just wait for the .resume.ready sentinel), so a
+    # legacy checkpoint resume leaves rank 0 with ff_step=200 while the other
+    # ranks keep 0. Rank 0 then skips straight to the epoch-end barrier while
+    # the other ranks train into the void -- mismatched collectives deadlock
+    # NCCL until the 3600s watchdog kills all ranks (seen on chunk 15cfdeaa).
+    if world > 1:
+        ff_t = torch.tensor([int(ff_step)], dtype=torch.long, device=device)
+        dist.broadcast(ff_t, src=0)
+        ff_step = int(ff_t.item())
     if master:
         print(f"resume adapter: {resume_dir or 'none (fresh LoRA)'}"
               + (f" (fast-forward to step {ff_step})" if ff_step else ""))
