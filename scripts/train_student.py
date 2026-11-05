@@ -512,8 +512,10 @@ def main() -> None:
                     }, step=None)
                     # mid-run plot refresh, same cadence as checkpoints: the
                     # UI Plots tab shows a slider across these snapshots
-                    if run_logger and args.save_every and step % args.save_every == 0:
-                        run_logger.report_progress_plot(step=step)
+                    # (run is the ClearMLRun shim; run_logger is the raw
+                    # clearml Logger and has no report_progress_plot)
+                    if run and args.save_every and step % args.save_every == 0:
+                        run.report_progress_plot(step=step)
                 accum_loss, tokens_seen = 0.0, 0
                 step += 1
                 # periodic checkpoint: saved locally + uploaded as an artifact so

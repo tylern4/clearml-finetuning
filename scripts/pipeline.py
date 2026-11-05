@@ -137,15 +137,30 @@ def try_stage(name: str, stage_args: list):
 
 
 def get_scalar(task_id: str, metric: str):
-    """Last reported value of a ClearML scalar metric, or None."""
+    """Last reported value of a ClearML scalar metric, or None.
+
+    ``metric`` may be dotted "title/series" (e.g. "eval/scicode_main_pass1",
+    as reported by run.log({...}) keys containing "/") or a bare series name
+    matched against any title.
+    """
     from clearml import Task
 
     try:
         scalars = Task.get_task(task_id=task_id).get_reported_scalars() or {}
+        if "/" in metric:
+            title_want, series_want = metric.split("/", 1)
+        else:
+            title_want, series_want = None, metric
         for _title, metrics in scalars.items():
+            if title_want and _title != title_want:
+                continue
             for m, vals in (metrics or {}).items():
-                if m == metric and vals:
-                    return vals[-1][1]
+                if m != series_want:
+                    continue
+                # get_reported_scalars yields {title: {series: {"y": [...]}}}
+                ys = vals.get("y") if isinstance(vals, dict) else vals
+                if ys:
+                    return ys[-1]
     except Exception as e:
         print(f"  get_scalar({metric}) failed: {e}")
     return None
