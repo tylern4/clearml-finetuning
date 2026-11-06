@@ -107,6 +107,8 @@ if ! "$VENV_PY" -c "import gguf, jinja2, sentencepiece" >/dev/null 2>&1; then
     "$VENV_PY" -m pip --version >/dev/null 2>&1 || "$VENV_PY" -m ensurepip --upgrade > /dev/null
     "$VENV_PY" -m pip install -q gguf jinja2 sentencepiece
 fi
+# the merge needs peft (and accelerate); the supervisor venv never trains
+"$VENV_PY" -c "import peft" >/dev/null 2>&1 || "$VENV_PY" -m pip install -q peft
 # NOTE: never install llama.cpp/requirements.txt - it downgrades the venv's
 # torch/transformers below what the Qwen3.8 architecture needs.
 
