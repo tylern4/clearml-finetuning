@@ -289,10 +289,13 @@ def main() -> None:
         "Fix the bug in utils/date.py where Feb 29 crashes the parser.",
         "Add a unit test for the retry helper in client/retry.py.",
     ]
+    sp_demo = llm.get_default_sampling_params()
+    sp_demo.temperature = 0.0
+    sp_demo.max_tokens = 700
     for i, dp in enumerate(demo_prompts):
         ptext = chat(tok, [{"role": "system", "content": system_prompt},
                            {"role": "user", "content": dp}])
-        out = strip_think(llm.generate([ptext], sp2, lora_request=lora_req)[0].outputs[0].text)
+        out = strip_think(llm.generate([ptext], sp_demo, lora_request=lora_req)[0].outputs[0].text)
         if run:
             run.report_sample(f"task: {dp}\n\nstudent actions:\n{out[:1200]}",
                               step=2 + i, label=f"demo_{i}")
