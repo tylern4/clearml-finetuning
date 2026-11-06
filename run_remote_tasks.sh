@@ -26,13 +26,17 @@ MODEL="${1:?usage: run_remote_tasks.sh MODEL [N_TASKS] [extra args...]}"
 N_TASKS="${2:-1200}"
 if [[ $# -ge 2 ]]; then shift 2; else shift; fi
 
-TASKS_URL="${TASKS_URL:-http://localhost:9090/v1}"
-TASKS_TOKEN="${TASKS_TOKEN:-none}"
+TASKS_URL="${TASKS_URL:-http://localhost:8989/v1}"
+TASKS_TOKEN="${TASKS_TOKEN:-${REMOTE_API_TOKEN:-none}}"
 S3_BASE="s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills"
 TAG="$(echo "$MODEL" | tr '/ ' '__')"
 TASKS_S3_URI="${TASKS_S3_URI:-$S3_BASE/${TAG}_tasks.jsonl}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# pick up TASKS_* / REMOTE_API_TOKEN overrides from .env (gitignored)
+if [[ -f "$HERE/.env" ]]; then set -a; source "$HERE/.env"; set +a; fi
+
 PY=""
 for c in "$HERE/.venv/bin/python" "$HERE/../.venv/bin/python"; do
     if [[ -x "$c" ]]; then PY="$c"; break; fi

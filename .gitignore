@@ -5,3 +5,6 @@ __pycache__/
 *.egg-info/
 .ipynb_checkpoints/
 .env
+.hf_cache/
+gguf/
+gguf_convert_*.out
