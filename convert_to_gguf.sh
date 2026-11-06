@@ -42,6 +42,16 @@ if [[ -z "$ADAPTER" ]]; then
 fi
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Perlmutter's Slurm copies batch scripts to /var/spool/slurmd/job<id>/ and
+# runs them there, so BASH_SOURCE is wrong under sbatch. Prefer the submit
+# dir (and pick whichever candidate actually has the project venv).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+for c in "${SLURM_SUBMIT_DIR:-}" "$SCRIPT_DIR"; do
+    if [[ -n "$c" && ( -x "$c/.venv/bin/python" || -x "$c/../.venv/bin/python" ) ]]; then
+        HERE="$c"
+        break
+    fi
+done
 
 # prefer the project venv (system python3 is 3.6 and cannot run the merge)
 VENV_PY=""
