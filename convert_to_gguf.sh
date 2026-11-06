@@ -102,7 +102,11 @@ fi
 LOG "adapter: $ADAPTER_DIR"
 
 # ------------------------------------------------- python deps + llama.cpp --
-"$VENV_PY" -m pip install -q -U gguf jinja2 sentencepiece
+# the campaign venv ships without pip (uv-made venv) - bootstrap it if needed
+if ! "$VENV_PY" -c "import gguf, jinja2, sentencepiece" >/dev/null 2>&1; then
+    "$VENV_PY" -m pip --version >/dev/null 2>&1 || "$VENV_PY" -m ensurepip --upgrade > /dev/null
+    "$VENV_PY" -m pip install -q gguf jinja2 sentencepiece
+fi
 # NOTE: never install llama.cpp/requirements.txt - it downgrades the venv's
 # torch/transformers below what the Qwen3.8 architecture needs.
 
@@ -163,7 +167,10 @@ fi
 LOG "merged model ready: $MERGED"
 
 # ------------------------------------------------------ convert + quantize --
-F16="$OUT_DIR/${BASE_TAG}-agent-f16.gguf"
+# intermediates live in $WORK and move into OUT_DIR only when complete, so a
+# killed job (e.g. a short debug-queue validation run) never leaves a
+# truncated deliverable that a re-run would skip over
+F16="$WORK/${BASE_TAG}-agent-f16.gguf"
 if [[ ! -f "$F16" ]]; then
     LOG "converting to f16 GGUF (~55 GB)"
     "$VENV_PY" "$LLAMA_DIR/convert_hf_to_gguf.py" "$MERGED" \
@@ -178,7 +185,8 @@ for QT in "${QTYPES[@]}"; do
     OUT="$OUT_DIR/${BASE_TAG}-agent-${QT}.gguf"
     if [[ ! -f "$OUT" ]]; then
         LOG "quantizing -> $QT"
-        "$QUANTIZE_BIN" "$F16" "$OUT" "$QT"
+        "$QUANTIZE_BIN" "$F16" "$WORK/tmp-${QT}.gguf" "$QT"
+        mv -f "$WORK/tmp-${QT}.gguf" "$OUT"
     fi
     MADE+=("$OUT")
 done
@@ -202,8 +210,8 @@ llama-cli -m $FIRST_GGUF -c 8192 -p '<task>' --no-display-prompt
 \`\`\`
 EOF
 
-if [[ "${KEEP_F16:-0}" != "1" && -f "$F16" ]]; then
-    rm -f "$F16"
+if [[ "${KEEP_F16:-0}" == "1" && -f "$F16" ]]; then
+    mv -f "$F16" "$OUT_DIR/$(basename "$F16")"
 fi
 rm -rf "$WORK"
 
