@@ -146,6 +146,33 @@ def add_tags(task_id: str, tags: list) -> None:
         print(f"  add_tags({task_id}, {tags}) failed: {e}")
 
 
+def spawn_gguf(train_id: str, epoch: int) -> str:
+    """Enqueue a convert_gguf side task and return at once - it runs in
+    parallel with the gate eval so a downloadable GGUF exists at every eval
+    point for external testing. Returns the task id ("" if the spawn itself
+    failed; never raises - the GGUF is a side deliverable, not a gate)."""
+    try:
+        print("== stage convert_gguf (side task, parallel with eval) ==")
+        tid = submit(["--stage", "convert_gguf", "--upstream-train", train_id])
+        finalize(tid, "convert_gguf")
+        add_tags(tid, ["convert_gguf", f"epoch{epoch}", "gguf"])
+        print(f"  task {tid} enqueued to '{QUEUE}'")
+        return tid
+    except Exception as e:
+        print(f"  WARNING: convert_gguf spawn failed (eval continues): {e}")
+        return ""
+
+
+def collect_gguf(gguf_id: str, epoch: int) -> None:
+    """Wait for the side GGUF task and tag the outcome. Non-fatal: a failed
+    GGUF conversion never gates training."""
+    if not gguf_id:
+        return
+    st = wait_for(gguf_id, STAGE_TIMEOUTS["convert_gguf"])
+    print(f"  side gguf: {st}  ({gguf_id})")
+    add_tags(gguf_id, ["gguf-ok" if st == "completed" else "gguf-failed"])
+
+
 def get_scalar(task_id: str, metric: str):
     """Last reported value of a ClearML scalar metric, or None.
 
@@ -334,12 +361,18 @@ def supervised_train(args, ids) -> None:
         print(f"total epochs done: {total}")
         add_tags(tid, [f"epoch{total}"])
         if args.eval_gate:
+            # external-testing deliverable: convert this chunk's adapter to
+            # GGUF while the gate eval runs (separate task, same queue)
+            gguf_id = ""
+            if not args.no_side_gguf:
+                gguf_id = spawn_gguf(ids["train"], total)
             eval_id, st = try_stage("eval", ["--stage", "eval",
                                              "--upstream-train", ids["train"],
                                              "--upstream-distill", distill_id,
                                              "--upstream-scicode", scicode_id])
             ids["eval"] = eval_id
             add_tags(eval_id, [f"epoch{total}", "gate-eval"])
+            gate_passed = False
             if st != "completed":
                 print(f"  eval after chunk failed ({st}); continuing training")
             else:
@@ -349,7 +382,14 @@ def supervised_train(args, ids) -> None:
                                    val >= args.eval_gate_min else "gate-fail"])
                 if val is not None and val >= args.eval_gate_min:
                     print(f"eval gate passed ({args.eval_gate}={val}) - stopping training")
-                    return
+                    gate_passed = True
+            # collect the side GGUF before moving on (usually already done,
+            # it runs alongside eval); failure never gates training
+            collect_gguf(gguf_id, total)
+            if gguf_id:
+                ids["side_gguf"] = gguf_id
+            if gate_passed:
+                return
         if not args.max_total_epochs and not args.eval_gate:
             break  # single-shot mode (default): one chunk, no gating
 
@@ -385,6 +425,8 @@ def main() -> int:
                     help="stop training when --eval-gate >= this value")
     ap.add_argument("--max-train-retries", type=int, default=2,
                     help="retries per train chunk on failure (resumes from checkpoint)")
+    ap.add_argument("--no-side-gguf", action="store_true",
+                    help="skip the parallel convert_gguf side task at each eval point")
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--epochs", type=int, default=20,
                     help="training epochs passed to the train stage")
@@ -422,8 +464,9 @@ def main() -> int:
         ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                      "--upstream-distill", ids["distill"],
                                                      "--upstream-scicode", ids["scicode_data"]])
-        ids["convert_gguf"] = run_stage(
-            "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
+        if not ids.get("side_gguf"):  # gated campaigns made one per chunk
+            ids["convert_gguf"] = run_stage(
+                "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
     elif args.from_stage:
         if args.from_stage == "code_data":
             ids["code_data"] = run_stage("code_data", code_args)
@@ -436,8 +479,9 @@ def main() -> int:
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", ids["train"],
                                                          "--upstream-distill", args.upstream_distill,
                                                          "--upstream-scicode", args.upstream_scicode])
-            ids["convert_gguf"] = run_stage(
-                "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
+            if not ids.get("side_gguf"):  # gated campaigns made one per chunk
+                ids["convert_gguf"] = run_stage(
+                    "convert_gguf", ["--stage", "convert_gguf", "--upstream-train", ids["train"]])
         elif args.from_stage == "eval":
             ids["eval"] = run_stage("eval", eval_args + ["--upstream-train", args.upstream_train,
                                                          "--upstream-distill", args.upstream_distill,
