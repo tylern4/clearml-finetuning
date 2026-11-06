@@ -131,9 +131,19 @@ def try_stage(name: str, stage_args: list):
     tid = submit(stage_args)
     finalize(tid, name)
     print(f"  task {tid} enqueued to '{QUEUE}'")
+    add_tags(tid, [name])
     st = wait_for(tid, STAGE_TIMEOUTS[name])
     print(f"  stage {name}: {st}  ({tid})")
     return tid, st
+
+
+def add_tags(task_id: str, tags: list) -> None:
+    """Best-effort tag merge on a task (keeps existing tags; never raises)."""
+    try:
+        from clearml import Task
+        Task.get_task(task_id=task_id).add_tags(list(tags))
+    except Exception as e:
+        print(f"  add_tags({task_id}, {tags}) failed: {e}")
 
 
 def get_scalar(task_id: str, metric: str):
@@ -322,17 +332,21 @@ def supervised_train(args, ids) -> None:
             raise RuntimeError("train chunk failed after all retries")
         total += chunk
         print(f"total epochs done: {total}")
+        add_tags(tid, [f"epoch{total}"])
         if args.eval_gate:
             eval_id, st = try_stage("eval", ["--stage", "eval",
                                              "--upstream-train", ids["train"],
                                              "--upstream-distill", distill_id,
                                              "--upstream-scicode", scicode_id])
             ids["eval"] = eval_id
+            add_tags(eval_id, [f"epoch{total}", "gate-eval"])
             if st != "completed":
                 print(f"  eval after chunk failed ({st}); continuing training")
             else:
                 val = get_scalar(eval_id, args.eval_gate)
                 print(f"  gate {args.eval_gate} = {val} (need >= {args.eval_gate_min})")
+                add_tags(eval_id, ["gate-pass" if val is not None and
+                                   val >= args.eval_gate_min else "gate-fail"])
                 if val is not None and val >= args.eval_gate_min:
                     print(f"eval gate passed ({args.eval_gate}={val}) - stopping training")
                     return
