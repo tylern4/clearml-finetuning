@@ -85,6 +85,13 @@ def main() -> None:
                          "code_data problems)")
     ap.add_argument("--code-distill-dir", type=str, default="code_distilled",
                     help="local code-distilled dir if present")
+    ap.add_argument("--extra-data", type=str, default="",
+                    help="comma-separated local paths, s3:// or https(s):// urls of "
+                         "extra mix-in JSONLs in {'messages': [...]} row format (e.g. "
+                         "outputs of scripts/make_remote_distill.py); one entry per "
+                         "model, mixed in like the code-distill rows")
+    ap.add_argument("--extra-dir", type=str, default="extra_data",
+                    help="local dir for fetched --extra-data files")
     ap.add_argument("--resume-task", type=str, default="",
                     help="upstream train task id whose student-adapter artifact to resume LoRA from")
     ap.add_argument("--resume-dir", type=str, default="resume_adapter",
@@ -164,6 +171,52 @@ def main() -> None:
                     raise RuntimeError(f"rank{rank}: timed out waiting for {ready}")
                 time.sleep(5)
 
+    def fetch_remote(url, dest_dir, ready_name):
+        """Fetch a remote JSONL (s3://, https(s)://, or local path) once per
+        node; same sentinel pattern as fetch_upstream. Returns the local path."""
+        import hashlib as _h
+
+        ready = os.path.join(dest_dir, ready_name)
+        out = os.path.join(
+            dest_dir, _h.sha1(url.encode()).hexdigest()[:16] + ".jsonl")
+        if os.path.exists(ready):
+            return out
+        if master:
+            os.makedirs(dest_dir, exist_ok=True)
+            if os.path.exists(url):
+                shutil.copy(url, out)
+            else:
+                from clearml.storage import StorageManager
+
+                local = StorageManager.get_local_copy(remote_url=url)
+                if not local:
+                    raise RuntimeError(f"could not fetch extra data: {url}")
+                if local.endswith(".zip"):
+                    import zipfile
+
+                    zdir = local[:-4] + "_x"
+                    if not os.path.isdir(zdir):
+                        with zipfile.ZipFile(local) as z:
+                            z.extractall(zdir)
+                    jsonls = [os.path.join(zdir, f) for f in os.listdir(zdir)
+                              if f.endswith(".jsonl")]
+                    if len(jsonls) != 1:
+                        raise RuntimeError(f"{url}: expected one .jsonl in the "
+                                           f"zip, got {jsonls}")
+                    local = jsonls[0]
+                if os.path.isdir(local):
+                    raise RuntimeError(f"extra data {url} unpacked to a directory; "
+                                       f"pass a direct .jsonl url")
+                shutil.copy(local, out)
+            open(ready, "w").close()
+        else:
+            deadline = time.time() + 3600
+            while not os.path.exists(ready):
+                if time.time() > deadline:
+                    raise RuntimeError(f"rank{rank}: timed out waiting for {ready}")
+                time.sleep(5)
+        return out
+
     if args.data_task:
         fetch_upstream(args.data_task, "distilled-data", args.data_dir, ".distilled.ready")
 
@@ -206,6 +259,15 @@ def main() -> None:
         cdist_rows = data.read_jsonl(cdist_train)
         sft_rows += [data.normalize_messages(r["messages"]) for r in cdist_rows]
         n_cdist = len(cdist_rows)
+
+    # ---- optional extra mix-ins (e.g. remote-model distill sets produced by
+    #      scripts/make_remote_distill.py; one JSONL url per model) ------------
+    for xi, xurl in enumerate([u.strip() for u in args.extra_data.split(",") if u.strip()]):
+        xpath = fetch_remote(xurl, args.extra_dir, f".extra{xi}.ready")
+        extra_rows = data.read_jsonl(xpath)
+        sft_rows += [data.normalize_messages(r["messages"]) for r in extra_rows]
+        if master:
+            print(f"extra data [{xi}] {len(extra_rows)} rows from {xurl}")
 
     # ---- optional resume from a previous train job's adapter ----------------
     resume_dir = ""

@@ -35,13 +35,17 @@ def main() -> None:
     ap.add_argument("--upstream-code-distill", type=str, default="",
                     help="upstream code_distill task id (teacher solutions for the "
                          "code_data problems); consumed by the train stage")
+    ap.add_argument("--extra-data", type=str, default="",
+                    help="comma-separated local/s3://https urls of extra train "
+                         "mix-in JSONLs (e.g. from scripts/make_remote_distill.py); "
+                         "passed to the train stage as --extra-data")
     ap.add_argument("--resume-train", type=str, default="",
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
                     help="epoch seed offset for resumed chunks")
     ap.add_argument("--hf-token", type=str, default="",
                     help="HF token for gated datasets; passed to the code_data stage "
-                         "as HF_TOKEN env (worker \$HOME may not have ~/.hf_token)")
+                         "as HF_TOKEN env (worker $HOME may not have ~/.hf_token)")
     ap.add_argument("--teacher", type=str, default=os.environ.get(
         "CML_TEACHER", "Qwen/Qwen3.8-27B"))
     ap.add_argument("--student", type=str, default=os.environ.get(
@@ -80,6 +84,7 @@ def main() -> None:
             "upstream_scicode": args.upstream_scicode,
             "upstream_code": args.upstream_code,
             "upstream_code_distill": args.upstream_code_distill,
+            "extra_data": args.extra_data,
             "resume_train": args.resume_train,
             "epoch_offset": args.epoch_offset,
             "hf_token": args.hf_token,
@@ -159,6 +164,7 @@ def main() -> None:
                "--scicode-task", str(params["upstream_scicode"]),
                "--code-task", str(params["upstream_code"]),
                "--code-distill-task", str(params.get("upstream_code_distill") or ""),
+               "--extra-data", str(params.get("extra_data") or ""),
                "--resume-task", str(params.get("resume_train") or ""),
                "--epoch-offset", str(params.get("epoch_offset") or 0),
                "--epochs", str(params["epochs"]),
