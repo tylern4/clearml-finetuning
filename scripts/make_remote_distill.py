@@ -239,11 +239,14 @@ def resolve_input(args, ops):
 def fit_messages(messages, max_chars):
     """Trim until the prompt fits `max_chars` (roughly max_chars/3.5 tokens).
 
-    Mirrors code_distill.fit_messages but without a tokenizer dependency:
-    drop the oldest non-system turns; hard-truncate the user text if only
+    max_chars <= 0 disables trimming entirely: the full problem is sent
+    as-is (default --max-prompt-chars 0). When trimming is enabled, drop the
+    oldest non-system turns first; hard-truncate the user text only if
     [system?, user] remains.
     """
     messages = data.normalize_messages([dict(m) for m in messages])
+    if max_chars <= 0:
+        return messages
     over = sum(len(m.get("content") or "") for m in messages) - max_chars
     while over > 0 and len(messages) > 2:
         del messages[1 if messages[0].get("role") == "system" else 0]
@@ -331,8 +334,11 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=900,
                     help="completion budget; keep prompt+completion under the "
                          "student's --max-len 2048 or the row is dropped in training")
-    ap.add_argument("--max-prompt-chars", type=int, default=3200,
-                    help="prompt context cap in characters (~3.5 chars/token)")
+    ap.add_argument("--max-prompt-chars", type=int, default=0,
+                    help="prompt context cap in characters (~3.5 chars/token); "
+                         "0 = send the full problem untruncated (default). The "
+                         "trainer keeps every row and only cuts the token tail "
+                         "at --max-len, so full prompts = more training signal.")
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--retries", type=int, default=5)
     ap.add_argument("--timeout", type=int, default=300, help="per-request seconds")
@@ -449,6 +455,15 @@ def main():
     data.write_jsonl(args.out, out_rows)
     print(f"wrote {len(out_rows)}/{len(problems)} rows to {args.out} "
           f"(failed/empty: {counters['fail']}, input dropped: {n_drop})", flush=True)
+    sizes = sorted(sum(len(m.get("content") or "") for m in r["messages"])
+                   for r in out_rows)
+    if sizes:
+        q = lambda f: sizes[min(len(sizes) - 1, int(f * (len(sizes) - 1)))]
+        over = sum(1 for s in sizes if s > 7150)
+        print(f"row size: p50={q(0.5)} p90={q(0.9)} p100={q(1.0)} chars "
+              f"(~3.5 chars/token; {over}/{len(sizes)} rows exceed the 2048-tok "
+              f"window and will be tail-truncated by the trainer, not dropped)",
+              flush=True)
     if not out_rows:
         raise SystemExit("no rows produced; nothing to upload")
 
