@@ -219,3 +219,17 @@ Rewrite it as a CORRECT transcript, JSONL only, obeying ALL of these rules:
 - MUST include at least one edit_file or write_file AND at least one run_cmd.
 Output the corrected JSONL only - no commentary, no markdown fences.
 """
+
+
+# Environment simulator for the eval's self-play trajectory check. After each
+# agent action, the model is re-prompted in this role to produce the
+# observation the tool would plausibly return - mirroring how the distilled
+# training transcripts simulated observations.
+SIMULATOR_SYSTEM_PROMPT = """You are the execution environment for a coding agent working in a repository.
+The conversation shows the task and the agent's actions so far; the LAST assistant message is the action just executed.
+Reply with ONLY the observation: the plausible tool output for that action - a file excerpt, command output, or error message.
+Rules:
+- Plain text only. No JSON, no markdown fences, no commentary, no explanations.
+- 1-2000 characters, realistic and concise.
+- If the command would produce no output, reply with something like "(no output)".
+"""

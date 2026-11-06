@@ -162,7 +162,15 @@ def main() -> None:
         run.log({"eval/humaneval_passed": passed, "eval/humaneval_n": len(problems),
                  "eval/pass1": pass1}, step=0)
 
-    # ---- trajectory format adherence ----------------------------------------
+    # ---- trajectory adherence (self-play agent loop) -------------------------
+    # The student is trained (build_sft_rows) on multi-turn trajectories: ONE
+    # action JSON per assistant turn, the simulated observation as the next
+    # user turn. A single-shot completion therefore can never satisfy the old
+    # one-shot JSONL check (it correctly emits one action and stops - 0/22 on
+    # every eval so far). Instead, replay the loop the training data encodes:
+    # generate an action, let the model simulate the environment observation,
+    # repeat until finish, then validate the assembled transcript with
+    # data.validate_transcript (unchanged).
     if args.data_task and not os.path.isdir(args.data_dir):
         local = cml.download_artifact(args.data_task, "distilled-data")
         os.makedirs(args.data_dir, exist_ok=True)
@@ -178,26 +186,100 @@ def main() -> None:
 
     rng = random.Random(0)
     sample = rng.sample(val_rows, min(args.adherence_n, len(val_rows))) if val_rows else []
-    agent_prompts = [
-        chat(tok, [{"role": "system", "content": system_prompt},
-                   {"role": "user", "content": f"{r['repo_context']}\n\nTask: {r['task']}"}])
-        for r in sample
-    ]
-    sp2 = llm.get_default_sampling_params()
-    sp2.temperature = 0.0
-    sp2.max_tokens = 1400
-    outs2 = llm.generate(agent_prompts, sp2, lora_request=lora_req)
 
-    valid = 0
-    for row, out in zip(sample, outs2):
-        text = strip_think(out.outputs[0].text)
-        if data.validate_transcript(text) is not None:
+    def _first_action(text):
+        """First ACTION_KEYS JSON object in a completion, or None."""
+        for line in strip_think(text).splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("action") in data.ACTION_KEYS:
+                return obj
+        return None
+
+    sp_act = llm.get_default_sampling_params()
+    sp_act.temperature = 0.0
+    sp_act.max_tokens = 400
+    sp_obs = llm.get_default_sampling_params()
+    sp_obs.temperature = 0.0
+    sp_obs.max_tokens = 700
+
+    trajectories = [{
+        "row": r,
+        "messages": [{"role": "system", "content": system_prompt},
+                     {"role": "user", "content": f"{r['repo_context']}\n\nTask: {r['task']}"}],
+        "lines": [], "n_actions": 0, "done": False, "reason": None,
+    } for r in sample]
+
+    # the validator caps transcripts at 8 actions (incl. finish); 9 turns is
+    # the hard ceiling - one more turn than allowed so overrun is visible
+    for _turn in range(9):
+        live = [t for t in trajectories if not t["done"]]
+        if not live:
+            break
+        outs = llm.generate([chat(tok, t["messages"]) for t in live],
+                            sp_act, lora_request=lora_req)
+        obs_jobs = []
+        for t, out in zip(live, outs):
+            act = _first_action(out.outputs[0].text)
+            if act is None:
+                t["done"], t["reason"] = True, "no-valid-action"
+                continue
+            line = json.dumps(act, ensure_ascii=False)
+            t["messages"].append({"role": "assistant", "content": line})
+            t["lines"].append(line)
+            t["n_actions"] += 1
+            if act["action"] == "finish":
+                t["done"] = True
+            elif t["n_actions"] >= 9:
+                t["done"], t["reason"] = True, "too-many-actions"
+            else:
+                obs_jobs.append(t)
+        if not obs_jobs:
+            break
+        # self-play the environment: the model simulates each observation in
+        # the simulator role (the distill teacher did the same when building
+        # the training data)
+        sim_prompts = [chat(tok, [{"role": "system",
+                                   "content": prompts.SIMULATOR_SYSTEM_PROMPT}]
+                            + t["messages"][1:]) for t in obs_jobs]
+        outs = llm.generate(sim_prompts, sp_obs, lora_request=lora_req)
+        for t, out in zip(obs_jobs, outs):
+            obs = strip_think(out.outputs[0].text).strip()
+            if not obs:
+                t["done"], t["reason"] = True, "empty-observation"
+                continue
+            obs = obs[:1800]
+            t["messages"].append({"role": "user",
+                                  "content": f"Observation:\n{obs}"})
+            t["lines"].append(json.dumps({"observation": obs},
+                                         ensure_ascii=False))
+
+    valid, reasons = 0, {}
+    n_valid_shown = 0
+    for t in trajectories:
+        text = "\n".join(t["lines"])
+        if t["reason"] is None and data.validate_transcript(text) is not None:
             valid += 1
-        elif run:
-            run.report_sample(f"invalid transcript for '{row['title']}':\n{text[:900]}",
-                              step=1, label=f"invalid_{row['fingerprint']}")
+            if run and n_valid_shown < 2:
+                n_valid_shown += 1
+                run.report_sample(
+                    f"valid self-play trajectory for '{t['row']['title']}':\n{text[:1800]}",
+                    step=1, label=f"valid_{t['row']['fingerprint']}")
+            continue
+        t["reason"] = t["reason"] or ("no-finish" if t["n_actions"] else "no-actions")
+        reasons[t["reason"]] = reasons.get(t["reason"], 0) + 1
+        if run:
+            run.report_sample(
+                f"invalid trajectory ({t['reason']}) for '{t['row']['title']}':\n{text[:1800]}",
+                step=1, label=f"invalid_{t['row']['fingerprint']}")
     frac = valid / max(1, len(sample))
-    print(f"trajectory adherence: {valid}/{len(sample)} = {frac:.3f}")
+    print(f"trajectory adherence (self-play): {valid}/{len(sample)} = {frac:.3f} "
+          f"failures={reasons}")
     if run:
         run.log({"eval/agent_tasks": len(sample), "eval/valid_trajectories": valid,
                  "eval/format_adherence": frac}, step=1)
