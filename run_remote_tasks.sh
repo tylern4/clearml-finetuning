@@ -16,9 +16,13 @@
 #                                  the raw-transcript archive is uploaded
 #                                  next to it as *.transcripts.jsonl)
 #   TASKS_GEN_MAX_TOKENS    task-invention budget  (default 800)
-#   TASKS_TRAJ_MAX_TOKENS   trajectory budget      (default 4000 - generous
-#                                  headroom for thinking models; only the
-#                                  final transcript is kept)
+#   TASKS_TRAJ_MAX_TOKENS   trajectory budget      (default 12000 - thinking
+#                                  models spend reasoning + answer out of ONE
+#                                  budget; only the final transcript is kept)
+#   TASKS_TIMEOUT   per-request seconds (default 900)
+#   TASKS_RETRY_KWARGS  JSON for a rescue pass over empty generations
+#                                  (default empty = off; empties retry free on
+#                                  rerun since they are not journaled)
 #
 # The script auto-uploads to S3 at the end (creds come from clearml.conf via
 # the StorageManager fallback) and prints the --extra-data line for training.
@@ -59,5 +63,7 @@ exec "$PY" -u "$HERE/scripts/make_remote_tasks.py" \
     --s3-uri "$TASKS_S3_URI" \
     --n-tasks "$N_TASKS" \
     --task-max-tokens "${TASKS_GEN_MAX_TOKENS:-800}" \
-    --traj-max-tokens "${TASKS_TRAJ_MAX_TOKENS:-4000}" \
+    --traj-max-tokens "${TASKS_TRAJ_MAX_TOKENS:-12000}" \
+    --timeout "${TASKS_TIMEOUT:-900}" \
+    --retry-kwargs "${TASKS_RETRY_KWARGS-''}" \
     "$@"

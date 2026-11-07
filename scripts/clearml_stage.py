@@ -39,6 +39,12 @@ def main() -> None:
                     help="comma-separated local/s3://https urls of extra train "
                          "mix-in JSONLs (e.g. from scripts/make_remote_distill.py); "
                          "passed to the train stage as --extra-data")
+    ap.add_argument("--max-len", type=int, default=16384,
+                    help="student training window in tokens (train stage only). "
+                         "Reasoning-distillation rows carry think-wrapped traces "
+                         "and MUST train with a raised window: at 2048 the tail "
+                         "truncation cuts off the final answer and the row is "
+                         "dropped as unsupervised")
     ap.add_argument("--resume-train", type=str, default="",
                     help="previous train task id to resume LoRA from (chunked training)")
     ap.add_argument("--epoch-offset", type=int, default=0,
@@ -79,6 +85,7 @@ def main() -> None:
             "lora_r": args.lora_r,
             "humaneval_n": args.humaneval_n,
             "student_quant": args.student_quant,
+            "max_len": args.max_len,
             "upstream_distill": args.upstream_distill,
             "upstream_train": args.upstream_train,
             "upstream_scicode": args.upstream_scicode,
@@ -168,6 +175,7 @@ def main() -> None:
                "--resume-task", str(params.get("resume_train") or ""),
                "--epoch-offset", str(params.get("epoch_offset") or 0),
                "--epochs", str(params["epochs"]),
+               "--max-len", str(params["max_len"]),
                "--lora-r", str(params["lora_r"])]
     elif stage == "eval":
         cmd = [py, script, "--student", str(params["student"]),

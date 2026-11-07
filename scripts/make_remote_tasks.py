@@ -27,7 +27,7 @@ messages-format file. Interrupted runs resume from journals in
 ~/.cache/remote_distill (pass 1 keyed by prompt index, pass 2 by task
 fingerprint), so re-running costs only the unfinished work.
 
-The student trains with --max-len 2048 and hard-truncates longer rows; this
+The student trains with --max-len 16384 and tail-truncates longer rows; this
 script reports the rendered-row size distribution and can optionally drop
 over-budget rows with --max-row-chars (default 0 = keep everything, same as
 the original pipeline).
@@ -111,11 +111,15 @@ def main():
     ap.add_argument("--max-row-chars", type=int, default=0,
                     help="drop final rows whose rendered messages exceed this "
                          "many characters (0 = keep everything; the trainer "
-                         "hard-truncates over-budget rows at --max-len 2048). "
-                         "2048 tokens is roughly 7150 chars.")
+                         "tail-truncates over-budget rows at --max-len). "
+                         "16384 tokens is roughly 57000 chars.")
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--retries", type=int, default=5)
     ap.add_argument("--timeout", type=int, default=300, help="per-request seconds")
+    ap.add_argument("--retry-kwargs", default="",
+                    help="JSON merged into the request body for a RESCUE pass "
+                         "over jobs whose first attempt returned empty; "
+                         "empty = off (empties retry free on rerun)")
     args = ap.parse_args()
 
     if not args.url:
@@ -151,9 +155,16 @@ def main():
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def gen_pool(ns, jobs, journal_path, journal, label):
+    def gen_pool(ns, jobs, journal_path, journal, label,
+                 extra_body=None, _top=True):
         """Run chat jobs {key: messages} not yet in the journal, concurrently.
-        Appends {key, text} records; returns {key: text} including prior ones."""
+        Appends {key, text} records; returns {key: text} including prior ones.
+
+        On the outer call, if --retry-kwargs is set, a RESCUE pass re-asks the
+        jobs that returned empty content with those kwargs merged into the
+        request body (thinking models can ramble past any completion budget;
+        bounding thinking, e.g. chat_template_kwargs {"thinking": false},
+        recovers an answer)."""
         todo = {k: m for k, m in jobs.items() if k not in journal}
         print(f"{label}: {len(todo)} to generate ({len(journal)} already done)",
               flush=True)
@@ -164,7 +175,7 @@ def main():
         counters = {"ok": 0, "fail": 0}
 
         def work(key, msgs):
-            return key, data.strip_think(chat_remote(ns, msgs))
+            return key, data.strip_think(chat_remote(ns, msgs, extra_body=extra_body))
 
         with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
             futs = {ex.submit(work, k, m): k for k, m in todo.items()}
@@ -181,7 +192,8 @@ def main():
                     print(f"  [{n}/{len(todo)}] {key} empty generation", flush=True)
                     continue
                 with lock:
-                    jf.write(json.dumps({"key": key, "text": text},
+                    jf.write(json.dumps({"key": key, "text": text,
+                                         **({"rescued": True} if extra_body else {})},
                                         ensure_ascii=False) + "\n")
                     jf.flush()
                     journal[key] = text
@@ -190,6 +202,14 @@ def main():
                     print(f"  [{n}/{len(todo)}] ok={counters['ok']} "
                           f"failed={counters['fail']}", flush=True)
         jf.close()
+        if _top and args.retry_kwargs:
+            still = {k: m for k, m in jobs.items() if k not in journal}
+            if still:
+                extra = json.loads(args.retry_kwargs)
+                print(f"{label} rescue: {len(still)} without completions, "
+                      f"retrying with {args.retry_kwargs}", flush=True)
+                journal = gen_pool(ns, still, journal_path, journal,
+                                   f"{label} rescue", extra, _top=False)
         return journal
 
     def load_journal(path):

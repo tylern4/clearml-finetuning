@@ -14,9 +14,11 @@ scripts/code_distill.py:
 Training chunks consume the result with `train_student.py --extra-data`;
 mixing several models is just comma-separating several URLs in that flag.
 
-Token accounting: the student trains with --max-len 2048 and hard-truncates
-longer rows (rows whose prompt alone overflows are dropped entirely), so the
-defaults keep prompt + completion inside that budget.
+Token accounting: reasoning traces are stored think-wrapped ahead of the
+answer (R1-style distillation), so rows are much longer than answers-only
+rows; the student trains with --max-len 16384 and tail-truncates longer rows
+(rows with no supervised tokens at all are dropped). The row-size report at
+the end shows how many rows exceed the training window.
 
 Examples
 --------
@@ -263,11 +265,35 @@ def fit_messages(messages, max_chars):
 
 
 # ------------------------------------------------------------------ remote API
-def chat_remote(args, messages):
-    """One chat completion; returns assistant text. Retries on transient errors."""
+# think tags are built from chr() so no shell/heredoc/filter pass can ever
+# mangle the literal markers the training format depends on
+THINK_OPEN = chr(60) + "think" + chr(62)
+THINK_CLOSE = chr(60) + "/think" + chr(62)
+
+
+def with_reasoning(reasoning, content):
+    """Combine a reasoning trace + final answer into one assistant text.
+
+    R1-style reasoning distillation: the trace is stored think-wrapped ahead
+    of the answer so the student learns to reason before answering. Empty
+    reasoning returns the content unchanged (non-thinking servers/models)."""
+    reasoning = (reasoning or "").strip()
+    if not reasoning:
+        return content
+    return f"{THINK_OPEN}\n{reasoning}\n{THINK_CLOSE}\n\n{content}"
+
+
+def chat_remote_full(args, messages, extra_body=None):
+    """One chat completion; returns (reasoning, content). Retries transient errors.
+
+    Reasoning models (e.g. GLM) return thinking in a separate `message.reasoning`
+    field; it is captured so it can be stored think-wrapped in the training row.
+    Non-reasoning servers return ("", content)."""
     url = args.url.rstrip("/") + "/chat/completions"
     body = {"model": args.model, "messages": messages,
             "temperature": args.temperature, "max_tokens": args.max_tokens}
+    if extra_body:
+        body.update(extra_body)
     headers = {"Content-Type": "application/json",
                "Authorization": f"Bearer {args.token}"}
     last_err = None
@@ -277,8 +303,9 @@ def chat_remote(args, messages):
                 url, data=json.dumps(body).encode(), headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=args.timeout) as r:
                 payload = json.loads(r.read().decode())
-            content = payload["choices"][0]["message"]["content"]
-            return content or ""
+            msg = payload["choices"][0]["message"]
+            reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
+            return reasoning, msg.get("content") or ""
         except urllib.error.HTTPError as e:
             err_body = e.read().decode(errors="replace")[:300]
             if e.code == 400 and "max_tokens" in err_body and "max_tokens" in body:
@@ -294,6 +321,14 @@ def chat_remote(args, messages):
         if attempt < args.retries:
             time.sleep(min(60.0, 3.0 * (2 ** attempt)))
     raise RuntimeError(f"chat completion failed after {args.retries + 1} attempts: {last_err}")
+
+
+def chat_remote(args, messages, extra_body=None):
+    """One chat completion; returns assistant text only (reasoning discarded).
+
+    Kept for callers that don't distill reasoning (make_remote_tasks); the
+    distill generator uses chat_remote_full to keep the reasoning trace."""
+    return chat_remote_full(args, messages, extra_body=extra_body)[1]
 
 
 # ------------------------------------------------------------------------ main
@@ -332,13 +367,25 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--temperature", type=float, default=0.3)
     ap.add_argument("--max-tokens", type=int, default=900,
-                    help="completion budget; keep prompt+completion under the "
-                         "student's --max-len 2048 or the row is dropped in training")
+                    help="completion budget; reasoning + answer share it, and "
+                         "only rows WITH a final answer are kept (reasoning "
+                         "alone would train non-termination)")
+    ap.add_argument("--train-max-len", type=int, default=16384,
+                    help="the student's --max-len, for reporting only: how many "
+                         "rows exceed the training window. Reasoning rows need "
+                         "the raised window - a truncated row loses its answer")
     ap.add_argument("--max-prompt-chars", type=int, default=0,
                     help="prompt context cap in characters (~3.5 chars/token); "
                          "0 = send the full problem untruncated (default). The "
                          "trainer keeps every row and only cuts the token tail "
                          "at --max-len, so full prompts = more training signal.")
+    ap.add_argument("--retry-kwargs", default="",
+                    help="JSON merged into the request body for a RESCUE pass "
+                         "over problems whose first attempt returned empty "
+                         "content; empty = no rescue pass (empties are retried "
+                         "for free on rerun). Prefer empty when distilling "
+                         "reasoning: rescue kwargs that bound thinking would "
+                         "store rows without a trace")
     ap.add_argument("--concurrency", type=int, default=8)
     ap.add_argument("--retries", type=int, default=5)
     ap.add_argument("--timeout", type=int, default=300, help="per-request seconds")
@@ -387,15 +434,17 @@ def main():
 
     # ---- resume journal -------------------------------------------------------
     done = {}
+    rescued = set()
     if os.path.exists(journal):
         for line in open(journal, encoding="utf-8"):
             line = line.strip()
             if line:
                 rec = json.loads(line)
                 done[rec["idx"]] = rec["text"]
+                if rec.get("rescued"):
+                    rescued.add(rec["idx"])
         print(f"resuming: {len(done)} completions already in journal {journal}", flush=True)
     jlock = threading.Lock()
-    jf = open(journal, "a", encoding="utf-8")
 
     todo = [(i, r, msgs) for i, r, msgs in problems if i not in done]
     print(f"{len(todo)} to generate ({len(done)} done)", flush=True)
@@ -404,33 +453,75 @@ def main():
     counters = {"done": len(done), "fail": 0}
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    def work(i, r, msgs):
-        text = data.strip_think(chat_remote(args, msgs))
-        return i, r, msgs, text
+    def run_pool(todo, extra_body, label):
+        """Generate completions for `todo`, journaling successes as they land."""
+        if not todo:
+            return
 
-    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
-        futs = {ex.submit(work, i, r, msgs): i for i, r, msgs in todo}
-        for n, fut in enumerate(as_completed(futs), 1):
-            i = futs[fut]
-            try:
-                i, r, msgs, text = fut.result()
-            except Exception as e:
-                counters["fail"] += 1
-                print(f"  [{n}/{len(todo)}] idx {i} FAILED: {e}", flush=True)
-                continue
-            if not text.strip():
-                counters["fail"] += 1
-                print(f"  [{n}/{len(todo)}] idx {i} empty generation", flush=True)
-                continue
-            with jlock:
-                jf.write(json.dumps({"idx": i, "text": text}, ensure_ascii=False) + "\n")
-                jf.flush()
-                done[i] = text
-            counters["done"] += 1
-            if n % 25 == 0 or n == len(todo):
-                print(f"  [{n}/{len(todo)}] solved={counters['done']} failed={counters['fail']}",
-                      flush=True)
-    jf.close()
+        def work(i, r, msgs):
+            reasoning, content = chat_remote_full(args, msgs, extra_body=extra_body)
+            if reasoning.strip():
+                # normalize: field reasoning wins; drop any inline think block
+                # the content itself carried so tags aren't doubled
+                answer = data.strip_think(content or "")
+            else:
+                # no field reasoning: keep the content as-is, including any
+                # inline think block the model wrote itself (never lose traces)
+                answer = content or ""
+            text = with_reasoning(reasoning, answer)
+            return i, r, msgs, text, answer
+
+        jf = open(journal, "a", encoding="utf-8")
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+                futs = {ex.submit(work, i, r, msgs): i for i, r, msgs in todo}
+                for n, fut in enumerate(as_completed(futs), 1):
+                    i = futs[fut]
+                    try:
+                        i, r, msgs, text, answer = fut.result()
+                    except Exception as e:
+                        counters["fail"] += 1
+                        print(f"  [{n}/{len(todo)}] idx {i} FAILED: {e}", flush=True)
+                        continue
+                    if not answer.strip():
+                        # no final answer -> nothing to supervise; reasoning alone
+                        # would train non-termination. Not journaled, so a rerun
+                        # retries it for free (fresh sample at temp > 0)
+                        counters["fail"] += 1
+                        print(f"  [{n}/{len(todo)}] idx {i} empty generation",
+                              flush=True)
+                        continue
+                    with jlock:
+                        jf.write(json.dumps({"idx": i, "text": text,
+                                             **({"rescued": True} if extra_body else {})},
+                                            ensure_ascii=False) + "\n")
+                        jf.flush()
+                        done[i] = text
+                    if extra_body:
+                        rescued.add(i)
+                    counters["done"] += 1
+                    if n % 25 == 0 or n == len(todo):
+                        print(f"  [{n}/{len(todo)}] solved={counters['done']} "
+                              f"failed={counters['fail']}", flush=True)
+        finally:
+            jf.close()
+
+    run_pool(todo, None, "pass 1")
+
+    # ---- rescue pass: re-ask the empties with extra request kwargs ------------
+    # opt-in via --retry-kwargs (default off). Empties are not journaled, so
+    # `done` is missing exactly the ones to re-ask, and a plain rerun retries
+    # them for free with a fresh sample. Note: a rescue that changes thinking
+    # behaviour (e.g. chat_template_kwargs {"thinking": false}) would produce
+    # rows WITHOUT a reasoning trace, so leave this off when distilling
+    # reasoning unless the mixed format is acceptable.
+    if args.retry_kwargs:
+        todo2 = [(i, r, msgs) for i, r, msgs in problems if i not in done]
+        if todo2:
+            extra = json.loads(args.retry_kwargs)
+            print(f"rescue pass: {len(todo2)} without completions, retrying "
+                  f"with {args.retry_kwargs}", flush=True)
+            run_pool(todo2, extra, "rescue")
 
     # ---- assemble + validate --------------------------------------------------
     out_rows = []
@@ -443,6 +534,10 @@ def main():
                "meta": {**(r.get("meta") or {}),
                         "source": ((r.get("meta") or {}).get("source", "?")
                                    + f"-remote:{args.model}")}}
+        if i in rescued:
+            # recovered by the rescue pass (only exists when --retry-kwargs is
+            # set) after pass 1 returned empty
+            out["meta"]["rescued"] = True
         out["messages"] = data.normalize_messages(out["messages"])
         if not any(m.get("role") == "user" for m in out["messages"]) or \
                 not out["messages"][-1].get("content", "").strip():
@@ -459,10 +554,12 @@ def main():
                    for r in out_rows)
     if sizes:
         q = lambda f: sizes[min(len(sizes) - 1, int(f * (len(sizes) - 1)))]
-        over = sum(1 for s in sizes if s > 7150)
+        window = int(args.train_max_len * 3.5)
+        over = sum(1 for s in sizes if s > window)
         print(f"row size: p50={q(0.5)} p90={q(0.9)} p100={q(1.0)} chars "
-              f"(~3.5 chars/token; {over}/{len(sizes)} rows exceed the 2048-tok "
-              f"window and will be tail-truncated by the trainer, not dropped)",
+              f"(~3.5 chars/token; {over}/{len(sizes)} rows exceed the "
+              f"{args.train_max_len}-tok training window - raise the trainer's "
+              f"--max-len or those rows lose their answer tail)",
               flush=True)
     if not out_rows:
         raise SystemExit("no rows produced; nothing to upload")
