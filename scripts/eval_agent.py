@@ -177,7 +177,8 @@ def main() -> None:
         import shutil
         for f in os.listdir(local):
             shutil.copy(os.path.join(local, f), args.data_dir)
-    val_rows = data.read_jsonl(os.path.join(args.data_dir, "val.jsonl"))
+    val_path = os.path.join(args.data_dir, "val.jsonl")
+    val_rows = data.read_jsonl(val_path) if os.path.exists(val_path) else []
     system_prompt = (val_rows[0]["messages"][0]["content"]
                      if val_rows and "messages" in val_rows[0]
                      else prompts.AGENT_SYSTEM_PROMPT)

@@ -226,8 +226,12 @@ def main() -> None:
 
     from clearml_finetuning import prompts
 
-    rows = data.read_jsonl(os.path.join(args.data_dir, "train.jsonl"))
+    # distill rows are optional: a campaign can train from scicode + extra-data
+    # alone (e.g. glm/mistral remote distills) with no teacher distill stage
+    distill_path = os.path.join(args.data_dir, "train.jsonl")
+    rows = data.read_jsonl(distill_path) if os.path.exists(distill_path) else []
     sft_rows = [r["messages"] for r in data.build_sft_rows(rows, prompts.AGENT_SYSTEM_PROMPT)]
+    n_agent = len(sft_rows)
 
     # ---- optional SciCode mix-in (multi-task: agent scaffold + science code) --
     n_scicode = 0
@@ -266,10 +270,12 @@ def main() -> None:
 
     # ---- optional extra mix-ins (e.g. remote-model distill sets produced by
     #      scripts/make_remote_distill.py; one JSONL url per model) ------------
+    n_extra = 0
     for xi, xurl in enumerate([u.strip() for u in args.extra_data.split(",") if u.strip()]):
         xpath = fetch_remote(xurl, args.extra_dir, f".extra{xi}.ready")
         extra_rows = data.read_jsonl(xpath)
         sft_rows += [data.normalize_messages(r["messages"]) for r in extra_rows]
+        n_extra += len(extra_rows)
         if master:
             print(f"extra data [{xi}] {len(extra_rows)} rows from {xurl}")
 
@@ -313,8 +319,8 @@ def main() -> None:
               + (f" (fast-forward to step {ff_step})" if ff_step else ""))
     if master:
         print(f"loaded {len(sft_rows)} training rows "
-              f"({len(sft_rows) - n_scicode - n_code - n_cdist} agent + {n_scicode} scicode "
-              f"+ {n_code} code-data + {n_cdist} code-teacher)")
+              f"({n_agent} agent + {n_scicode} scicode "
+              f"+ {n_code} code-data + {n_cdist} code-teacher + {n_extra} extra)")
 
     # tokenize with assistant-only loss mask; fall back to masking the
     # assistant suffix if the chat template lacks generation markers
