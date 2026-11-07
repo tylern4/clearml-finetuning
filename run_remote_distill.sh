@@ -71,6 +71,6 @@ exec "$PY" -u "$HERE/scripts/make_remote_distill.py" \
     --limit "$LIMIT" \
     --max-tokens "${DISTILL_MAX_TOKENS:-40000}" \
     --timeout "${DISTILL_TIMEOUT:-3600}" \
-    --retry-kwargs "${DISTILL_RETRY_KWARGS-''}" \
+    --retry-kwargs "${DISTILL_RETRY_KWARGS:-}" \
     --train-max-len "${DISTILL_TRAIN_MAX_LEN:-49152}" \
     "$@"

@@ -127,6 +127,19 @@ def main():
                          "empty = off (empties retry free on rerun)")
     args = ap.parse_args()
 
+    # normalize --retry-kwargs once: tolerate the old wrapper default (literal
+    # '' or ""), surrounding whitespace, and fail fast with a clear message on
+    # invalid JSON instead of crashing mid-run at the rescue pass
+    _rk = (args.retry_kwargs or "").strip()
+    if _rk in ("''", '""'):
+        _rk = ""
+    elif _rk:
+        try:
+            json.loads(_rk)
+        except json.JSONDecodeError as e:
+            raise SystemExit(f"--retry-kwargs is not valid JSON ({e}): {_rk[:80]!r}")
+    args.retry_kwargs = _rk
+
     if not args.url:
         raise SystemExit("--url required (or env REMOTE_BASE_URL)")
     if not args.token:

@@ -65,5 +65,5 @@ exec "$PY" -u "$HERE/scripts/make_remote_tasks.py" \
     --task-max-tokens "${TASKS_GEN_MAX_TOKENS:-800}" \
     --traj-max-tokens "${TASKS_TRAJ_MAX_TOKENS:-12000}" \
     --timeout "${TASKS_TIMEOUT:-900}" \
-    --retry-kwargs "${TASKS_RETRY_KWARGS-''}" \
+    --retry-kwargs "${TASKS_RETRY_KWARGS:-}" \
     "$@"
