@@ -43,6 +43,11 @@ import urllib.error
 import urllib.request
 import zipfile
 
+try:
+    from tqdm import tqdm
+except ImportError:  # optional: progress falls back to periodic prints
+    tqdm = None
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from clearml_finetuning import data  # noqa: E402  (stdlib-only helpers)
@@ -472,6 +477,11 @@ def main():
             return i, r, msgs, text, answer
 
         jf = open(journal, "a", encoding="utf-8")
+        pbar = None if tqdm is None else tqdm(
+            total=len(todo), desc=label, unit="prob", dynamic_ncols=True,
+            # disable=None: auto-hide when stderr is not a TTY (piped/nohup),
+            # so log files get the plain print lines instead of bar spam
+            disable=None)
         try:
             with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
                 futs = {ex.submit(work, i, r, msgs): i for i, r, msgs in todo}
@@ -482,28 +492,37 @@ def main():
                     except Exception as e:
                         counters["fail"] += 1
                         print(f"  [{n}/{len(todo)}] idx {i} FAILED: {e}", flush=True)
-                        continue
-                    if not answer.strip():
-                        # no final answer -> nothing to supervise; reasoning alone
-                        # would train non-termination. Not journaled, so a rerun
-                        # retries it for free (fresh sample at temp > 0)
-                        counters["fail"] += 1
-                        print(f"  [{n}/{len(todo)}] idx {i} empty generation",
-                              flush=True)
-                        continue
-                    with jlock:
-                        jf.write(json.dumps({"idx": i, "text": text,
-                                             **({"rescued": True} if extra_body else {})},
-                                            ensure_ascii=False) + "\n")
-                        jf.flush()
-                        done[i] = text
-                    if extra_body:
-                        rescued.add(i)
-                    counters["done"] += 1
-                    if n % 25 == 0 or n == len(todo):
+                    else:
+                        if not answer.strip():
+                            # no final answer -> nothing to supervise; reasoning
+                            # alone would train non-termination. Not journaled,
+                            # so a rerun retries it free (fresh temp-0.3 sample)
+                            counters["fail"] += 1
+                            print(f"  [{n}/{len(todo)}] idx {i} empty generation",
+                                  flush=True)
+                        else:
+                            with jlock:
+                                jf.write(json.dumps(
+                                    {"idx": i, "text": text,
+                                     **({"rescued": True} if extra_body else {})},
+                                    ensure_ascii=False) + "\n")
+                                jf.flush()
+                                done[i] = text
+                            if extra_body:
+                                rescued.add(i)
+                            counters["done"] += 1
+                    # every completion advances the bar (success, empty, failed)
+                    if pbar is not None and not pbar.disable:
+                        pbar.update(1)
+                        pbar.set_postfix(ok=counters["done"],
+                                         fail=counters["fail"])
+                    elif n % 25 == 0 or n == len(todo):
+                        # bar hidden (piped/nohup) or tqdm missing: plain prints
                         print(f"  [{n}/{len(todo)}] solved={counters['done']} "
                               f"failed={counters['fail']}", flush=True)
         finally:
+            if pbar is not None:
+                pbar.close()
             jf.close()
 
     run_pool(todo, None, "pass 1")

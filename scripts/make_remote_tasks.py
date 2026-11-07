@@ -51,6 +51,11 @@ import random
 import sys
 import threading
 
+try:
+    from tqdm import tqdm
+except ImportError:  # optional: progress falls back to periodic prints
+    tqdm = None
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -173,35 +178,51 @@ def main():
         lock = threading.Lock()
         jf = open(journal_path, "a", encoding="utf-8")
         counters = {"ok": 0, "fail": 0}
+        pbar = None if tqdm is None else tqdm(
+            total=len(todo), desc=label, unit="task", dynamic_ncols=True,
+            # disable=None: auto-hide when stderr is not a TTY (piped/nohup),
+            # so log files get the plain print lines instead of bar spam
+            disable=None)
 
         def work(key, msgs):
             return key, data.strip_think(chat_remote(ns, msgs, extra_body=extra_body))
 
-        with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
-            futs = {ex.submit(work, k, m): k for k, m in todo.items()}
-            for n, fut in enumerate(as_completed(futs), 1):
-                key = futs[fut]
-                try:
-                    key, text = fut.result()
-                except Exception as e:
-                    counters["fail"] += 1
-                    print(f"  [{n}/{len(todo)}] {key} FAILED: {e}", flush=True)
-                    continue
-                if not text.strip():
-                    counters["fail"] += 1
-                    print(f"  [{n}/{len(todo)}] {key} empty generation", flush=True)
-                    continue
-                with lock:
-                    jf.write(json.dumps({"key": key, "text": text,
-                                         **({"rescued": True} if extra_body else {})},
-                                        ensure_ascii=False) + "\n")
-                    jf.flush()
-                    journal[key] = text
-                counters["ok"] += 1
-                if n % 25 == 0 or n == len(todo):
-                    print(f"  [{n}/{len(todo)}] ok={counters['ok']} "
-                          f"failed={counters['fail']}", flush=True)
-        jf.close()
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+                futs = {ex.submit(work, k, m): k for k, m in todo.items()}
+                for n, fut in enumerate(as_completed(futs), 1):
+                    key = futs[fut]
+                    try:
+                        key, text = fut.result()
+                    except Exception as e:
+                        counters["fail"] += 1
+                        print(f"  [{n}/{len(todo)}] {key} FAILED: {e}", flush=True)
+                    else:
+                        if not text.strip():
+                            counters["fail"] += 1
+                            print(f"  [{n}/{len(todo)}] {key} empty generation",
+                                  flush=True)
+                        else:
+                            with lock:
+                                jf.write(json.dumps(
+                                    {"key": key, "text": text,
+                                     **({"rescued": True} if extra_body else {})},
+                                    ensure_ascii=False) + "\n")
+                                jf.flush()
+                                journal[key] = text
+                            counters["ok"] += 1
+                    # every completion advances the bar (ok, empty, failed)
+                    if pbar is not None and not pbar.disable:
+                        pbar.update(1)
+                        pbar.set_postfix(ok=counters["ok"], fail=counters["fail"])
+                    elif n % 25 == 0 or n == len(todo):
+                        # bar hidden (piped/nohup) or tqdm missing: plain prints
+                        print(f"  [{n}/{len(todo)}] ok={counters['ok']} "
+                              f"failed={counters['fail']}", flush=True)
+        finally:
+            if pbar is not None:
+                pbar.close()
+            jf.close()
         if _top and args.retry_kwargs:
             still = {k: m for k, m in jobs.items() if k not in journal}
             if still:
@@ -336,7 +357,7 @@ def main():
           f"(+ {len(rows)} raw transcripts to {out_traj}; dropped by "
           f"--max-row-chars: {dropped})", flush=True)
     print(f"rendered row size: p50={p(0.5)} p90={p(0.9)} p100={p(1.0)} chars "
-          f"(~3.5 chars/token; student budget 2048 tok ~= 7150 chars)", flush=True)
+          f"(~3.5 chars/token; student window 49152 tok ~= 172000 chars)", flush=True)
 
     # ---- upload ----------------------------------------------------------------
     ops = get_s3_ops(args)
