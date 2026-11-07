@@ -291,6 +291,9 @@ def supervised_train(args, ids) -> None:
     """
     total = args.epoch_offset
     resume = args.resume_train
+    best_val = None       # best gate value seen so far (any chunk)
+    best_train = ""       # train task id that produced best_val
+    best_total = 0        # epoch count at best_val
     if resume:
         st = wait_for(resume, 12 * 3600)
         print(f"resume source {resume}: {st}")
@@ -318,6 +321,8 @@ def supervised_train(args, ids) -> None:
                      "--upstream-code-distill", cdistill_id,
                      "--resume-train", resume,
                      "--epoch-offset", str(total)]
+            if args.extra_data:
+                targs += ["--extra-data", args.extra_data]
             tid, st = try_stage("train", targs)
             arts = task_artifact_names(tid)
             if "student-adapter" in arts:
@@ -383,6 +388,22 @@ def supervised_train(args, ids) -> None:
                 if val is not None and val >= args.eval_gate_min:
                     print(f"eval gate passed ({args.eval_gate}={val}) - stopping training")
                     gate_passed = True
+                elif val is not None and (best_val is None or val > best_val):
+                    best_val, best_train, best_total = val, ids["train"], total
+                    print(f"  new best gate value: {val} (epoch{total})")
+                elif (args.stop_on_eval_decrease and val is not None
+                      and best_val is not None and val < best_val):
+                    print(f"  gate DECREASED: {val} < best {best_val} "
+                          f"(epoch{best_total}) - stopping training")
+                    add_tags(eval_id, ["eval-regression"])
+                    add_tags(tid, ["eval-regression"])
+                    collect_gguf(gguf_id, total)
+                    if gguf_id:
+                        ids["side_gguf"] = gguf_id
+                    if best_train:
+                        ids["train"] = best_train
+                        print(f"  deliverable rewinds to epoch{best_total} ({best_train})")
+                    return
             # collect the side GGUF before moving on (usually already done,
             # it runs alongside eval); failure never gates training
             collect_gguf(gguf_id, total)
@@ -425,6 +446,13 @@ def main() -> int:
                     help="stop training when --eval-gate >= this value")
     ap.add_argument("--max-train-retries", type=int, default=2,
                     help="retries per train chunk on failure (resumes from checkpoint)")
+    ap.add_argument("--extra-data", default="",
+                    help="comma-separated local/s3://https urls of extra train data "
+                         "(e.g. remote distills) passed through to every train chunk")
+    ap.add_argument("--stop-on-eval-decrease", action="store_true",
+                    help="stop training when the gate metric drops below the best "
+                         "value seen so far (the deliverable rewinds to the best "
+                         "chunk, not the regressed one)")
     ap.add_argument("--no-side-gguf", action="store_true",
                     help="skip the parallel convert_gguf side task at each eval point")
     ap.add_argument("--all", action="store_true")
