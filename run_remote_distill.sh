@@ -46,7 +46,7 @@ if [[ -f "$HERE/.env" ]]; then set -a; source "$HERE/.env"; set +a; fi
 
 DISTILL_URL="${DISTILL_URL:-http://localhost:8989/v1}"
 DISTILL_TOKEN="${DISTILL_TOKEN:-${REMOTE_API_TOKEN:-none}}"
-DISTILL_INPUT="${DISTILL_INPUT:-s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/clearml-finetuning/qwen3.8-coder-v2/finetune-code_data.b426ba99ad90419a8243282883ce2457/artifacts/code-data/code.zip}"
+DISTILL_INPUT="${DISTILL_INPUT:-s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/code_train_v3.jsonl}"
 S3_BASE="s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills"
 TAG="$(echo "$MODEL" | tr '/ ' '__')"
 DISTILL_S3_URI="${DISTILL_S3_URI:-$S3_BASE/$TAG.jsonl}"
