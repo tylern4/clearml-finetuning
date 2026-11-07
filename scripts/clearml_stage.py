@@ -39,7 +39,7 @@ def main() -> None:
                     help="comma-separated local/s3://https urls of extra train "
                          "mix-in JSONLs (e.g. from scripts/make_remote_distill.py); "
                          "passed to the train stage as --extra-data")
-    ap.add_argument("--max-len", type=int, default=16384,
+    ap.add_argument("--max-len", type=int, default=24576,
                     help="student training window in tokens (train stage only). "
                          "Reasoning-distillation rows carry think-wrapped traces "
                          "and MUST train with a raised window: at 2048 the tail "

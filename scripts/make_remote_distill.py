@@ -370,7 +370,7 @@ def main():
                     help="completion budget; reasoning + answer share it, and "
                          "only rows WITH a final answer are kept (reasoning "
                          "alone would train non-termination)")
-    ap.add_argument("--train-max-len", type=int, default=16384,
+    ap.add_argument("--train-max-len", type=int, default=24576,
                     help="the student's --max-len, for reporting only: how many "
                          "rows exceed the training window. Reasoning rows need "
                          "the raised window - a truncated row loses its answer")

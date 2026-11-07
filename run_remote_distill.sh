@@ -14,19 +14,20 @@
 #   DISTILL_INPUT   problem-set jsonl/zip
 #                                     (default: the campaign code_data set)
 #   DISTILL_S3_URI  full s3 destination (default <S3_BASE>/<model_tag>.jsonl)
-#   DISTILL_MAX_TOKENS  completion budget (default 12000 - thinking models spend
+#   DISTILL_MAX_TOKENS  completion budget (default 20000 - thinking models spend
 #                      reasoning + answer out of ONE budget; BOTH are kept:
 #                      the reasoning is stored think-wrapped ahead of the
 #                      answer so the student learns to reason)
-#   DISTILL_TIMEOUT     per-request seconds (default 900)
+#   DISTILL_TIMEOUT     per-request seconds (default 1800 - 20k-token
+#                      generations plus queueing need the headroom)
 #   DISTILL_RETRY_KWARGS  JSON merged into the request body for a rescue pass
 #                      over empty generations. Default: off - rows without a
 #                      final answer are dropped and retried free on rerun.
 #                      NOTE: rescue kwargs that bound thinking (e.g. thinking
 #                      false) would store rows WITHOUT a reasoning trace
 #   DISTILL_TRAIN_MAX_LEN  student --max-len, for the row-size report
-#                      (default 16384 - reasoning rows need the raise; at 2048
-#                      a truncated row loses its answer)
+#                      (default 24576 - raised with the budget so recovered
+#                      long-thinking rows still fit the training window)
 #
 # The script auto-uploads to S3 at the end (creds come from clearml.conf via
 # the StorageManager fallback) and prints the --extra-data line for training.
@@ -68,8 +69,8 @@ exec "$PY" -u "$HERE/scripts/make_remote_distill.py" \
     --input "$DISTILL_INPUT" \
     --s3-uri "$DISTILL_S3_URI" \
     --limit "$LIMIT" \
-    --max-tokens "${DISTILL_MAX_TOKENS:-12000}" \
-    --timeout "${DISTILL_TIMEOUT:-900}" \
+    --max-tokens "${DISTILL_MAX_TOKENS:-20000}" \
+    --timeout "${DISTILL_TIMEOUT:-1800}" \
     --retry-kwargs "${DISTILL_RETRY_KWARGS-''}" \
-    --train-max-len "${DISTILL_TRAIN_MAX_LEN:-16384}" \
+    --train-max-len "${DISTILL_TRAIN_MAX_LEN:-24576}" \
     "$@"
