@@ -17,6 +17,7 @@ Output artifact `code-data`: a directory containing code_train.jsonl.
 """
 
 import argparse
+import ast
 import json
 import os
 import random
@@ -84,9 +85,16 @@ def bigcodebench_rows(cap):
     rows = []
     for _, r in df.iterrows():
         libs = r.get("libs") or []
+        # the parquet column arrives as the STRING "['csv', 'collections', ...]";
+        # joining that directly iterates characters -> ", ', c, s, v, ..." garbage
+        if isinstance(libs, str):
+            try:
+                libs = ast.literal_eval(libs)
+            except (ValueError, SyntaxError):
+                libs = [libs]
         user = f"{r['code_prompt']}\n\n{r['instruct_prompt']}"
         if libs:
-            user += f"\n\nAllowed libraries: {', '.join(libs)}"
+            user += f"\n\nAllowed libraries: {', '.join(map(str, libs))}"
         assistant = f"{r['complete_prompt']}{r['canonical_solution']}"
         row = msg_row(prompts.CODE_SYSTEM_PROMPT, [
             {"role": "user", "content": user},
