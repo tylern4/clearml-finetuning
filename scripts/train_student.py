@@ -113,7 +113,7 @@ def main() -> None:
     ap.add_argument("--device-batch-size", type=int, default=1,
                     help="9B bf16 + LoRA on 40GB A100s: keep at 1")
     ap.add_argument("--grad-accum", type=int, default=8)
-    ap.add_argument("--max-len", type=int, default=24576,
+    ap.add_argument("--max-len", type=int, default=49152,
                     help="token window; over-window rows are tail-truncated. "
                          "Reasoning rows (think-wrapped traces) need the raise: "
                          "at 2048 the answer tail is cut and the row is dropped "
