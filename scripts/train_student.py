@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 from clearml_finetuning import cml, data  # noqa: E402
 
@@ -33,6 +34,66 @@ _stop = {"flag": False}
 
 def _on_sigterm(signum, frame):
     _stop["flag"] = True
+
+
+class ChunkedLossPeft(torch.nn.Module):
+    """Wraps a PeftModelForCausalLM to bound logits memory.
+
+    The stock path materializes the full [batch*seq, vocab] logits tensor
+    before the loss: at 24k tokens x 151936 vocab that is ~22GB on its own
+    (plus the fp32 CE copy) and OOMs 40GB A100s under DDP even with 4bit
+    weights + gradient checkpointing. Instead this wrapper forwards only the
+    transformer trunk, then applies lm_head + cross-entropy over chunks of
+    *supervised* tokens (prompt positions, masked -100, are filtered before
+    the head), so peak logits memory is chunk_tokens x vocab instead.
+
+    Numerically identical to the stock CausalLM loss (shift-by-one, mean over
+    non-ignored tokens). Calling the trunk through DDP's forward keeps the
+    gradient allreduce semantics: DDP wraps this module, its forward calls
+    the trunk, so every trainable (LoRA) param gets its reduction hook fired.
+    Unknown attributes delegate to the wrapped model, so save_pretrained and
+    friends keep working through DDP.module.
+    """
+
+    def __init__(self, peft_model, chunk_tokens=2048):
+        super().__init__()
+        self.peft = peft_model
+        self.chunk_tokens = max(1, int(chunk_tokens))
+
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        if labels is None:
+            raise ValueError("ChunkedLossPeft requires labels (training loss)")
+        causal = self.peft.get_base_model()
+        hidden = causal.model(
+            input_ids=input_ids, attention_mask=attention_mask,
+            use_cache=False,
+        ).last_hidden_state
+        shift_h = hidden[:, :-1, :]
+        shift_y = labels[:, 1:]
+        keep = shift_y != -100
+        h = shift_h[keep]
+        y = shift_y[keep]
+        n = h.size(0)
+        if n == 0:
+            # unreachable: rows with zero supervised tokens are dropped at
+            # tokenize time, but keep the graph well-defined
+            return hidden.sum() * 0.0
+        loss_sum = None
+        for i in range(0, n, self.chunk_tokens):
+            logits = causal.lm_head(h[i:i + self.chunk_tokens]).float()
+            part = F.cross_entropy(logits, y[i:i + self.chunk_tokens],
+                                   reduction="sum")
+            loss_sum = part if loss_sum is None else loss_sum + part
+        return loss_sum / n
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            # delegate unknown attrs to the wrapped model (e.g. save_pretrained
+            # called through DDP.module). self.peft is a registered submodule,
+            # so its params stay visible to DDP and the optimizer.
+            return getattr(super().__getattr__("peft"), name)
 
 
 def ckpt_global_step(resume_dir):
@@ -118,6 +179,11 @@ def main() -> None:
                          "Reasoning rows (think-wrapped traces) need the raise: "
                          "at 2048 the answer tail is cut and the row is dropped "
                          "as unsupervised")
+    ap.add_argument("--ce-chunk-tokens", type=int, default=2048,
+                    help="chunked-CE granularity: lm_head+cross-entropy run "
+                         "over this many supervised tokens at a time so the "
+                         "full [seq, vocab] logits tensor is never built. "
+                         "0 disables chunking (stock HF loss)")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -458,6 +524,12 @@ def main() -> None:
         model.print_trainable_parameters()
     model.gradient_checkpointing_enable()
     model.to(device)
+    if args.ce_chunk_tokens > 0:
+        if master:
+            print(f"chunked CE: {args.ce_chunk_tokens} tokens/pass "
+                  f"(full-logit path would need seq x vocab materialized)",
+                  flush=True)
+        model = ChunkedLossPeft(model, chunk_tokens=args.ce_chunk_tokens)
     if is_ddp:
         from torch.nn.parallel import DistributedDataParallel as DDP
         model = DDP(model, device_ids=[local], output_device=local)
@@ -547,8 +619,8 @@ def main() -> None:
                 continue
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
-            out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
-            loss = out.loss / args.grad_accum
+            out_loss = model(input_ids=input_ids, attention_mask=attn, labels=labels)
+            loss = out_loss / args.grad_accum
             if not torch.isfinite(loss):
                 # non-finite loss would poison the weights via NaN grads; skip
                 # this micro-batch entirely
