@@ -80,7 +80,12 @@ def main() -> None:
     ap.add_argument("--data-dir", type=str, default="distilled")
     ap.add_argument("--humaneval-n", type=int, default=0, help="0 = all 164 problems")
     ap.add_argument("--adherence-n", type=int, default=64)
-    ap.add_argument("--max-tokens", type=int, default=512)
+    ap.add_argument("--max-tokens", type=int, default=4096,
+                    help="generation budget per prompt. Reasoning-distilled "
+                         "students emit think-wrapped traces before the "
+                         "answer, so small budgets truncate mid-think "
+                         "(extracts to empty) or mid-code and read as bogus "
+                         "pass@1 = 0")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
     ap.add_argument("--scicode-dir", type=str, default="scicode_test")
     args = ap.parse_args()
@@ -157,7 +162,11 @@ def main() -> None:
         finally:
             os.unlink(path)
     pass1 = passed / max(1, len(problems))
+    n_trunc = sum(1 for o in outs if o.outputs[0].finish_reason == "length")
     print(f"HumanEval pass@1: {passed}/{len(problems)} = {pass1:.3f}")
+    if n_trunc:
+        print(f"  WARNING: {n_trunc}/{len(outs)} generations hit the "
+              f"max_tokens={args.max_tokens} cap (finish_reason=length)")
     if run:
         run.log({"eval/humaneval_passed": passed, "eval/humaneval_n": len(problems),
                  "eval/pass1": pass1}, step=0)
@@ -492,10 +501,16 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
 
     sp = llm.get_default_sampling_params()
     sp.temperature = 0.0
-    sp.max_tokens = 768
+    # the budget must cover the student's think-wrapped traces (learned from
+    # think-distill data) PLUS the answer code. A small cap truncates
+    # mid-think (extracts to empty) or mid-code (guaranteed test failure);
+    # epoch-1 eval lost ~half its sampled failures this way at 768.
+    sp.max_tokens = args.max_tokens
 
     # generate step-by-step per problem (batch across problems per step index)
     generated = {}  # (problem_id, step_idx) -> code
+    finishes = {}   # (problem_id, step_idx) -> vllm finish_reason
+    n_trunc = n_empty = 0
     max_steps = max(len(p["sub_steps"]) for p in problems)
     for step_idx in range(max_steps):
         batch, keys = [], []
@@ -521,9 +536,20 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
             keys.append((p["problem_id"], step_idx))
         outs = llm.generate(batch, sp, lora_request=lora_req)
         for k, out in zip(keys, outs):
-            generated[k] = _extract_code(out.outputs[0].text)
+            o = out.outputs[0]
+            generated[k] = _extract_code(o.text)
+            finishes[k] = o.finish_reason or ""
+            if finishes[k] == "length":
+                n_trunc += 1
+            if not generated[k]:
+                n_empty += 1
         print(f"  generated sub-step column {step_idx + 1}/{max_steps} "
               f"({len(keys)} problems)")
+
+    if n_trunc or n_empty:
+        print(f"  WARNING: {n_trunc} generations truncated at "
+              f"max_tokens={sp.max_tokens}, {n_empty} extracted to empty "
+              f"(think-burn or truncation) - these count as test failures")
 
     # execute each sub-step against its h5-backed test cases
     def check_one(item):
@@ -587,6 +613,7 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
             _t.upload_artifact("eval-results", _metrics)
             _fails = [{"problem": pid, "step": j + 1,
                        "error": (err or "")[:400],
+                       "finish_reason": finishes.get((pid, j), ""),
                        "generated": (generated.get((pid, j), "") or "")[:1200]}
                       for pid, j, ok, err in [r for r in results if not r[2]][:20]]
             if _fails:
