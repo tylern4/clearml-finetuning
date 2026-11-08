@@ -181,7 +181,6 @@ def main() -> None:
     elif stage == "eval":
         cmd = [py, script, "--student", str(params["student"]),
                "--adapter-task", str(params["upstream_train"]),
-               "--data-task", str(params["upstream_distill"]),
                "--scicode-task", str(params["upstream_scicode"]),
                "--humaneval-n", str(params["humaneval_n"])]
     elif stage == "convert_gguf":

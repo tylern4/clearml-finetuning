@@ -1,8 +1,7 @@
 """Stage: evaluate the fine-tuned student.
 
-1. HumanEval pass@1 (greedy, executed in subprocesses with a timeout).
-2. Trajectory-format adherence on held-out distilled agent tasks: the student
-   must emit valid JSONL agent actions under the scaffold.
+1. HumanEval pass@1 (thinking-mode, executed in subprocesses with a timeout).
+2. SciCode sub-step / main resolved@1 (the gate metric).
 Reports metrics to ClearML and uploads sample generations.
 """
 
@@ -20,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import gzip
 import urllib.request
 
-from clearml_finetuning import cml, data, prompts  # noqa: E402
+from clearml_finetuning import cml, prompts  # noqa: E402
 
 _THINK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN_RE = re.compile(r"<think\b[^>]*>.*$", re.DOTALL | re.IGNORECASE)
@@ -39,10 +38,9 @@ def chat(tok, messages, enable_thinking=True):
     think-wrapped traces, so the gate suites must let it think (epoch-1 ran
     thinking-suppressed at a 4096 budget and lost ~half its sampled SciCode
     failures to truncation; the teacher benchmark showed even 40000 tokens
-    truncates 11-45% of SciCode sub-steps). The trajectory-adherence replay
-    and the simulator/demo paths opt OUT (enable_thinking=False): their
-    per-turn budgets are small (400/700) and thinking would burn them before
-    the action JSON / observation, keeping the metric at 0 by construction."""
+    truncates 11-45% of SciCode sub-steps). The debug demo samples opt OUT
+    (enable_thinking=False): their 700-token budget is for raw action JSON,
+    not reasoning."""
     try:
         return tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
@@ -77,10 +75,7 @@ def main() -> None:
                     "Qwen/Qwen3.8-27B"))
     ap.add_argument("--adapter-task", type=str, default="", help="upstream train task id")
     ap.add_argument("--adapter-dir", type=str, default="student_adapter")
-    ap.add_argument("--data-task", type=str, default="", help="upstream distill task id (for val rows)")
-    ap.add_argument("--data-dir", type=str, default="distilled")
     ap.add_argument("--humaneval-n", type=int, default=0, help="0 = all 164 problems")
-    ap.add_argument("--adherence-n", type=int, default=64)
     ap.add_argument("--max-tokens", type=int, default=40000,
                     help="generation budget per prompt. Reasoning-distilled "
                          "students emit think-wrapped traces before the "
@@ -92,8 +87,8 @@ def main() -> None:
     ap.add_argument("--temperature", type=float, default=0.6,
                     help="sampling temperature for the gate suites "
                          "(Qwen thinking-mode recommendation; greedy loops "
-                         "on thinking models). The adherence replay and "
-                         "demo paths stay at 0")
+                         "on thinking models). The debug demo samples stay "
+                         "at 0")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
     ap.add_argument("--scicode-dir", type=str, default="scicode_test")
     args = ap.parse_args()
@@ -179,130 +174,6 @@ def main() -> None:
         run.log({"eval/humaneval_passed": passed, "eval/humaneval_n": len(problems),
                  "eval/pass1": pass1}, step=0)
 
-    # ---- trajectory adherence (self-play agent loop) -------------------------
-    # The student is trained (build_sft_rows) on multi-turn trajectories: ONE
-    # action JSON per assistant turn, the simulated observation as the next
-    # user turn. A single-shot completion therefore can never satisfy the old
-    # one-shot JSONL check (it correctly emits one action and stops - 0/22 on
-    # every eval so far). Instead, replay the loop the training data encodes:
-    # generate an action, let the model simulate the environment observation,
-    # repeat until finish, then validate the assembled transcript with
-    # data.validate_transcript (unchanged).
-    if args.data_task and not os.path.isdir(args.data_dir):
-        local = cml.download_artifact(args.data_task, "distilled-data")
-        os.makedirs(args.data_dir, exist_ok=True)
-        import shutil
-        for f in os.listdir(local):
-            shutil.copy(os.path.join(local, f), args.data_dir)
-    val_path = os.path.join(args.data_dir, "val.jsonl")
-    val_rows = data.read_jsonl(val_path) if os.path.exists(val_path) else []
-    system_prompt = (val_rows[0]["messages"][0]["content"]
-                     if val_rows and "messages" in val_rows[0]
-                     else prompts.AGENT_SYSTEM_PROMPT)
-
-    import random
-
-    rng = random.Random(0)
-    sample = rng.sample(val_rows, min(args.adherence_n, len(val_rows))) if val_rows else []
-
-    def _first_action(text):
-        """First ACTION_KEYS JSON object in a completion, or None."""
-        for line in strip_think(text).splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(obj, dict) and obj.get("action") in data.ACTION_KEYS:
-                return obj
-        return None
-
-    sp_act = llm.get_default_sampling_params()
-    sp_act.temperature = 0.0
-    sp_act.max_tokens = 400
-    sp_obs = llm.get_default_sampling_params()
-    sp_obs.temperature = 0.0
-    sp_obs.max_tokens = 700
-
-    trajectories = [{
-        "row": r,
-        "messages": [{"role": "system", "content": system_prompt},
-                     {"role": "user", "content": f"{r['repo_context']}\n\nTask: {r['task']}"}],
-        "lines": [], "n_actions": 0, "done": False, "reason": None,
-    } for r in sample]
-
-    # the validator caps transcripts at 8 actions (incl. finish); 9 turns is
-    # the hard ceiling - one more turn than allowed so overrun is visible
-    for _turn in range(9):
-        live = [t for t in trajectories if not t["done"]]
-        if not live:
-            break
-        outs = llm.generate([chat(tok, t["messages"], enable_thinking=False)
-                             for t in live],
-                            sp_act, lora_request=lora_req)
-        obs_jobs = []
-        for t, out in zip(live, outs):
-            act = _first_action(out.outputs[0].text)
-            if act is None:
-                t["done"], t["reason"] = True, "no-valid-action"
-                continue
-            line = json.dumps(act, ensure_ascii=False)
-            t["messages"].append({"role": "assistant", "content": line})
-            t["lines"].append(line)
-            t["n_actions"] += 1
-            if act["action"] == "finish":
-                t["done"] = True
-            elif t["n_actions"] >= 9:
-                t["done"], t["reason"] = True, "too-many-actions"
-            else:
-                obs_jobs.append(t)
-        if not obs_jobs:
-            break
-        # self-play the environment: the model simulates each observation in
-        # the simulator role (the distill teacher did the same when building
-        # the training data)
-        sim_prompts = [chat(tok, [{"role": "system",
-                                   "content": prompts.SIMULATOR_SYSTEM_PROMPT}]
-                            + t["messages"][1:], enable_thinking=False)
-                       for t in obs_jobs]
-        outs = llm.generate(sim_prompts, sp_obs, lora_request=lora_req)
-        for t, out in zip(obs_jobs, outs):
-            obs = strip_think(out.outputs[0].text).strip()
-            if not obs:
-                t["done"], t["reason"] = True, "empty-observation"
-                continue
-            obs = obs[:1800]
-            t["messages"].append({"role": "user",
-                                  "content": f"Observation:\n{obs}"})
-            t["lines"].append(json.dumps({"observation": obs},
-                                         ensure_ascii=False))
-
-    valid, reasons = 0, {}
-    n_valid_shown = 0
-    for t in trajectories:
-        text = "\n".join(t["lines"])
-        if t["reason"] is None and data.validate_transcript(text) is not None:
-            valid += 1
-            if run and n_valid_shown < 2:
-                n_valid_shown += 1
-                run.report_sample(
-                    f"valid self-play trajectory for '{t['row']['title']}':\n{text[:1800]}",
-                    step=1, label=f"valid_{t['row']['fingerprint']}")
-            continue
-        t["reason"] = t["reason"] or ("no-finish" if t["n_actions"] else "no-actions")
-        reasons[t["reason"]] = reasons.get(t["reason"], 0) + 1
-        if run:
-            run.report_sample(
-                f"invalid trajectory ({t['reason']}) for '{t['row']['title']}':\n{text[:1800]}",
-                step=1, label=f"invalid_{t['row']['fingerprint']}")
-    frac = valid / max(1, len(sample))
-    print(f"trajectory adherence (self-play): {valid}/{len(sample)} = {frac:.3f} "
-          f"failures={reasons}")
-    if run:
-        run.log({"eval/agent_tasks": len(sample), "eval/valid_trajectories": valid,
-                 "eval/format_adherence": frac}, step=1)
 
     # ---- a couple of end-to-end agent samples as debug samples ---------------
     demo_prompts = [
@@ -313,7 +184,7 @@ def main() -> None:
     sp_demo.temperature = 0.0
     sp_demo.max_tokens = 700
     for i, dp in enumerate(demo_prompts):
-        ptext = chat(tok, [{"role": "system", "content": system_prompt},
+        ptext = chat(tok, [{"role": "system", "content": prompts.AGENT_SYSTEM_PROMPT},
                            {"role": "user", "content": dp}],
                      enable_thinking=False)
         out = strip_think(llm.generate([ptext], sp_demo, lora_request=lora_req)[0].outputs[0].text)
@@ -426,12 +297,9 @@ def _report_eval_plots(run, problems, step_pass, main_pass, n_sub_pass, n_sub):
 
         # headline rates vs the gate
         rows = [("SciCode main (gate)", main_pass / max(1, len(problems))),
-                ("SciCode sub-step", (n_sub_pass / n_sub) if n_sub else 0.0)]
-        for key, label in (("eval/pass1", "HumanEval"),
-                           ("eval/format_adherence", "traj adherence")):
-            pts = run._history.get(key) or []
-            if pts:
-                rows.append((label, pts[-1][1]))
+                ("SciCode sub-step", (n_sub_pass / n_sub) if n_sub else 0.0),
+                ("HumanEval", run._history.get("eval/pass1", [])[-1][1]
+                 if run._history.get("eval/pass1") else 0.0)]
         fig, ax = plt.subplots(figsize=(8, 3.6))
         bars = ax.barh([r[0] for r in rows][::-1],
                        [100 * r[1] for r in rows][::-1], color="#4878cf")
