@@ -99,13 +99,14 @@ def main() -> None:
         },
         name="stage",
     )
-    output_uri = os.environ.get("WF_OUTPUT_URI")
-    if output_uri:
-        task.output_uri = output_uri
-        try:
-            task.get_logger().set_default_upload_destination(output_uri)
-        except Exception:
-            pass
+    from clearml_finetuning.cml import DEFAULT_OUTPUT_URI
+
+    output_uri = os.environ.get("WF_OUTPUT_URI") or DEFAULT_OUTPUT_URI
+    task.output_uri = output_uri
+    try:
+        task.get_logger().set_default_upload_destination(output_uri)
+    except Exception:
+        pass
 
     if args.register:
         print(f"register stage task: id={task.id}")

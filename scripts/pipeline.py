@@ -19,6 +19,8 @@ import sys
 import time
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_DIR)
+from clearml_finetuning.cml import DEFAULT_OUTPUT_URI  # noqa: E402
 QUEUE = os.environ.get("CLEARML_QUEUE", "muller")
 DOCKER = os.environ.get("CML_DOCKER", "nvcr.io/nvidia/cuda:13.1.1-runtime-ubuntu24.04")
 REPO_URL = os.environ.get("CML_REPO_URL", "https://github.com/tylern4/clearml-finetuning.git")
@@ -57,7 +59,7 @@ def submit(stage_args: list) -> str:
     """Run the stage runner locally until it self-enqueues; return the task id."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("CLEARML_", "TRAINS_", "WF_"))}
-    env["WF_OUTPUT_URI"] = os.environ.get("WF_OUTPUT_URI", "")
+    env["WF_OUTPUT_URI"] = os.environ.get("WF_OUTPUT_URI", DEFAULT_OUTPUT_URI)
     out = subprocess.run(
         [sys.executable, "-u", "-m", "scripts.clearml_stage", *stage_args],
         capture_output=True, text=True, timeout=600,

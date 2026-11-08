@@ -8,6 +8,12 @@ as debug samples, and emits a multi-panel summary figure on finish().
 import os
 import time
 
+# Artifacts, models, and debug samples go to S3 by default; the shared ClearML
+# fileserver is quota-limited. ClearML appends <project>/<task-name>.<task-id>/
+# under this prefix automatically.
+DEFAULT_OUTPUT_URI = ("s3://s3-bucket-loadbalancer.das-redpanda.production"
+                      ".svc.spin.nersc.org:5432/dasml/clearml")
+
 _TERMINAL = {"completed", "failed", "stopped", "closed", "published"}
 
 
@@ -50,15 +56,14 @@ class ClearMLRun:
             auto_connect_frameworks=False,
             reuse_last_task_id=False,
         )
-        if output_uri or os.environ.get("WF_OUTPUT_URI"):
-            uri = output_uri or os.environ.get("WF_OUTPUT_URI")
-            self.task.output_uri = uri
-            # debug samples default to the files server; keep them on the
-            # task's output storage (e.g. S3) as well
-            try:
-                self.task.get_logger().set_default_upload_destination(uri)
-            except Exception:
-                pass
+        uri = output_uri or os.environ.get("WF_OUTPUT_URI") or DEFAULT_OUTPUT_URI
+        self.task.output_uri = uri
+        # debug samples default to the files server; keep them on the
+        # task's output storage (e.g. S3) as well
+        try:
+            self.task.get_logger().set_default_upload_destination(uri)
+        except Exception:
+            pass
         if config is not None:
             cfg = config if isinstance(config, dict) else vars(config)
             self.task.connect(cfg, name="config")
