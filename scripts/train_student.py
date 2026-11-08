@@ -45,7 +45,10 @@ class ChunkedLossPeft(torch.nn.Module):
     weights + gradient checkpointing. Instead this wrapper forwards only the
     transformer trunk, then applies lm_head + cross-entropy over chunks of
     *supervised* tokens (prompt positions, masked -100, are filtered before
-    the head), so peak logits memory is chunk_tokens x vocab instead.
+    the head), so peak logits memory is chunk_tokens x vocab instead. Each
+    chunk's head+CE is itself gradient-checkpointed, so autograd retains only
+    one chunk of logits at a time (a naive chunk loop would still retain every
+    chunk's fp32 logits + log_softmax until the backward).
 
     Numerically identical to the stock CausalLM loss (shift-by-one, mean over
     non-ignored tokens). Calling the trunk through DDP's forward keeps the
@@ -80,9 +83,16 @@ class ChunkedLossPeft(torch.nn.Module):
             return hidden.sum() * 0.0
         loss_sum = None
         for i in range(0, n, self.chunk_tokens):
-            logits = causal.lm_head(h[i:i + self.chunk_tokens]).float()
-            part = F.cross_entropy(logits, y[i:i + self.chunk_tokens],
-                                   reduction="sum")
+            hc, yc = h[i:i + self.chunk_tokens], y[i:i + self.chunk_tokens]
+            # checkpoint the head+CE per chunk: plain autograd would retain
+            # EVERY chunk's fp32 logits + log_softmax until backward (at 16k
+            # tokens x 248k vocab that is ~30 GiB of saved tensors), while the
+            # checkpoint discards them and recomputes one chunk at a time in
+            # the backward, bounding CE memory to a single chunk
+            part = torch.utils.checkpoint.checkpoint(
+                lambda hc_, yc_: F.cross_entropy(
+                    causal.lm_head(hc_).float(), yc_, reduction="sum"),
+                hc, yc, use_reentrant=False)
             loss_sum = part if loss_sum is None else loss_sum + part
         return loss_sum / n
 
@@ -469,11 +479,15 @@ def main() -> None:
         if quant == "8bit":
             load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         else:
-            # fp32 compute: the gated-delta-rule (linear attention) scan in
-            # bf16 is numerically unstable and produced NaN loss in the first
-            # steps; fp32 dequant+matmul keeps it stable (base stays 4-bit).
+            # bf16 compute (NOT fp32): the gated-delta-rule core upcasts to fp32
+            # internally (transformers' reference chunk_gated_delta_rule casts
+            # q/k/v/beta/g to fp32 and back), so the scan stays stable at bf16 —
+            # fp32 compute instead doubles EVERY activation, and the gradient-
+            # checkpointing stash alone (64 layers x 16k tokens x 5120 x 4B) is
+            # 21.5 GiB on top of ~15 GiB of 4-bit weights, which OOMs 40GB A100s.
+            # bf16 halves the stash to ~10.7 GiB and runs matmuls ~8x faster.
             load_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.float32,
+                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True)
         load_kwargs.pop("torch_dtype", None)
         if torch.cuda.is_available():
@@ -647,6 +661,9 @@ def main() -> None:
                 if master:
                     dt = time.time() - t0
                     t0 = time.time()
+                    print(f"step {step}: {dt:.1f}s, cuda peak "
+                          f"{torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
+                          flush=True)
                     run_logger and run.log({
                         "step": step,
                         "train/loss": accum_loss,

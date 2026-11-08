@@ -37,7 +37,10 @@ REQUIREMENTS = {
     "code_distill": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88",
                      "clearml>=2.1", "boto3", "matplotlib"],
     "train": ["torch>=2.9.0", "transformers>=4.57", "peft>=0.17", "accelerate>=1.10",
-              "bitsandbytes>=0.46", "clearml>=2.1", "boto3", "matplotlib"],
+              "bitsandbytes>=0.46", "flash-linear-attention", "clearml>=2.1", "boto3",
+              "matplotlib",
+              "# rebuild venv 2026-11-08: bf16 compute + fla kernels (16k rows OOM'd "
+              "on the fp32-compute checkpoint stash + reference delta-rule scan)"],
     "eval": ["vllm>=0.11.0", "ninja", "nvidia-cuda-nvrtc==13.0.88", "peft>=0.17",
              "h5py", "numpy", "scipy", "clearml>=2.1", "boto3", "matplotlib",
              "# rebuild venv 2026-11-04: poisoned venvs-cache entry lacked vllm"],
