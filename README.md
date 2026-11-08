@@ -14,32 +14,49 @@ reports scalars/plots/debug samples natively.
 distill  ->  train  ->  eval  ->  convert_gguf
 ```
 
+1. **distill** — a large teacher (default `Qwen/Qwen3.8-27B`, vLLM, TP=4)
+   generates synthetic coding-agent tasks *and* full tool-use trajectories under
+   a fixed agent scaffold (`run_cmd` / `read_file` / `edit_file` / `finish`
+   actions, JSONL format). Output: `train.jsonl` + `val.jsonl` artifacts.
+   Trajectories distilled from other teachers (e.g. served-endpoint runs) can
+   be injected via `--extra-data s3://…` without rerunning this stage.
+2. **train** — the student (default `Qwen/Qwen3.5-9B`) is fine-tuned with LoRA
+   (peft) on the distilled trajectories, DDP across 4 GPUs, assistant-only loss
+   masking. Output: adapter checkpoint artifact.
+3. **eval** — merged student is served with vLLM: HumanEval pass@1 (executed)
+   plus SciCode sub-step pass@1 and main resolved@1, thinking-mode with a
+   distill-matched token budget. Output: metrics + sample generations.
 4. **convert_gguf** — merge the LoRA adapter into the base student, convert
    to GGUF (pinned llama.cpp release) and quantize (Q4_K_M + Q8_0) so the
    fine-tuned model runs on a laptop with llama.cpp/Ollama. GGUF files are
    uploaded as artifacts.
 
-The pipeline runs as — a large teacher (Qwen3.8-27B, vLLM, TP=4)
-   generates synthetic coding-agent tasks *and* full tool-use trajectories under
-   a fixed agent scaffold (`run_cmd` / `read_file` / `edit_file` / `finish`
-   actions, JSONL format). Output: `train.jsonl` + `val.jsonl` artifacts.
-2. **train** — the student (Qwen3.5-9B) is fine-tuned with LoRA
-   (peft) on the distilled trajectories, DDP across 4 GPUs, assistant-only loss
-   masking. Output: adapter checkpoint artifact.
-3. **eval** — merged student is served with vLLM: HumanEval pass@1 (executed)
-   plus trajectory-format adherence on held-out agent tasks. Output: metrics +
-   sample generations.
+SciCode test data is provided to eval by a `scicode_data` stage (registered
+upstream via `--upstream-scicode`). The controller can gate the epoch loop on
+any reported scalar (e.g. `--eval-gate eval/scicode_main_pass1
+--eval-gate-min 0.05`), stopping when the metric drops.
+
+The active campaign (`scripts/launch_campaign_fresh.sh`) self-distills
+`Qwen/Qwen3.8-27B` (teacher = student): the trajectory JSONLs distilled from
+the served teachers (glm-5.3-flash, mistral-large-4) enter through
+`--extra-data`, and the gate is `eval/scicode_main_pass1 >= 0.05` — both
+teachers score 1.5% / 10.8% on that metric, so the gate sits below them.
 
 ## Layout
 
 ```
 clearml_finetuning/      package: clearml shim, prompts, data helpers
 scripts/
-  distill_data.py        stage 1: teacher generation
-  train_student.py       stage 2: LoRA SFT
-  eval_agent.py          stage 3: evaluation
+  distill_data.py        stage: teacher generation
+  scicode_data.py        stage: registers the SciCode test set for eval
+  code_data.py           stage: real-code task data
+  code_distill.py        stage: distillation against real code tasks
+  train_student.py       stage: LoRA SFT
+  eval_agent.py          stage: evaluation (HumanEval + SciCode)
+  convert_gguf.py        stage: merge + GGUF quantization (side task)
   clearml_stage.py       per-stage task runner (Task.init, artifact handoff)
   pipeline.py            controller: creates/enqueues/polls stage tasks
+  launch_campaign_*.sh   committed campaign launchers (fresh = canonical)
 configs/                 default configs
 ```
 
@@ -49,6 +66,10 @@ Requires a ClearML agent on a 4-GPU queue and a ClearML config with S3 access
 for artifact storage.
 
 ```bash
+# full campaign as committed (train -> eval -> gate -> gguf loop, fresh
+# lineage; sources .env for credentials):
+zsh scripts/launch_campaign_fresh.sh
+
 # controller runs the whole chain (requires the repo to be pushed; the
 # agent clones the pinned commit)
 python scripts/pipeline.py --all
@@ -103,5 +124,6 @@ GPU; CPU-only inference with Q4_K_M runs at usable speeds for a 9B model.
 - Distilled trajectories are *simulated* by the teacher (no real tool
   execution during generation). Executing real tools in a sandboxed loop
   (true agentic distillation) is the obvious v2.
-- Models default to Qwen2.5-Coder family; the code is model-agnostic apart
-  from the chat template's assistant-mask support.
+- Models default to the Qwen3 family (`Qwen/Qwen3.8-27B` teacher,
+  `Qwen/Qwen3.5-9B` student); the code is model-agnostic apart from the chat
+  template's assistant-mask support.

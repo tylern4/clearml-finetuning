@@ -4,8 +4,7 @@
 # --epoch-offset / --eval-resume-source.
 #
 # Reproducible start-to-finish:
-#   code  = origin/main c62f082 ("eval: remove the trajectory-adherence
-#           metric") - every stage pins the pushed HEAD at its creation
+#   code  = origin/main c62f082 - every stage pins the pushed HEAD at its creation
 #   data  = the two S3 teacher JSONLs below (pinned objects, produced by
 #           teacher_eval/teacher_eval.py runs against the teachers' serving
 #           endpoints) + registered SciCode test task 767a2048

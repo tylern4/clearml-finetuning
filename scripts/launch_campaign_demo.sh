@@ -1,8 +1,8 @@
 #!/bin/zsh
 # HISTORICAL (lineage archived 2026-11-08): the original demo campaign at gate
-# 0.15. Its evals ran the trajectory-adherence metric (removed in c62f082) and
-# the gate value exceeded every teacher (glm 1.5% / mistral 10.8% on
-# eval/scicode_main_pass1). Kept for provenance of the archived ClearML tasks.
+# 0.15. Its evals ran the pre-c62f082 eval code, and the gate value exceeded
+# every teacher (glm 1.5% / mistral 10.8% on eval/scicode_main_pass1). Kept
+# for provenance of the archived ClearML tasks.
 # Run with:  zsh scripts/launch_campaign_demo.sh
 set -e
 cd "$(dirname "$0")/.."
