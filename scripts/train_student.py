@@ -749,6 +749,15 @@ def main() -> None:
         (model.module if hasattr(model, "module") else model).save_pretrained(args.out_dir)
         tok.save_pretrained(args.out_dir)
         if run:
+            # the artifact must be a flat adapter tree: drop nested dirs
+            # (ckpt-step* resume checkpoints - already durable as the
+            # student-adapter-ckpt artifact - and clearml's leftover
+            # <hash>.*_artifacts_archive_cache staging dirs from those
+            # uploads, which broke convert_gguf and doubled the zip size)
+            for entry in os.listdir(args.out_dir):
+                path = os.path.join(args.out_dir, entry)
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
             from pathlib import Path
             run.task.upload_artifact("student-adapter", Path(args.out_dir), wait_on_upload=True)
     if is_ddp:

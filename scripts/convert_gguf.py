@@ -48,7 +48,13 @@ def main() -> None:
         local = cml.download_artifact(args.adapter_task, "student-adapter")
         os.makedirs(args.adapter_dir, exist_ok=True)
         for f in os.listdir(local):
-            shutil.copy(os.path.join(local, f), os.path.join(args.adapter_dir, f))
+            src = os.path.join(local, f)
+            # older train packaging nested ckpt dirs / agent archive-cache
+            # staging dirs inside the zip; the merge only needs the flat
+            # top-level adapter files
+            if os.path.isdir(src):
+                continue
+            shutil.copy(src, os.path.join(args.adapter_dir, f))
 
     # ---- 2. merge LoRA into the base model (CPU) -----------------------------
     import torch
