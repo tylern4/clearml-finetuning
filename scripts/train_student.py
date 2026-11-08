@@ -189,11 +189,12 @@ def main() -> None:
                          "Reasoning rows (think-wrapped traces) need the raise: "
                          "at 2048 the answer tail is cut and the row is dropped "
                          "as unsupervised")
-    ap.add_argument("--ce-chunk-tokens", type=int, default=2048,
+    ap.add_argument("--ce-chunk-tokens", type=int, default=1024,
                     help="chunked-CE granularity: lm_head+cross-entropy run "
                          "over this many supervised tokens at a time so the "
-                         "full [seq, vocab] logits tensor is never built. "
-                         "0 disables chunking (stock HF loss)")
+                         "full [seq, vocab] logits tensor is never built "
+                         "(1024 -> ~0.9 GiB fp32 logits per chunk on the "
+                         "248k vocab). 0 disables chunking (stock HF loss)")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -509,7 +510,11 @@ def main() -> None:
         if master and n_up:
             print(f"upcast {n_up} linear-attention modules to fp32")
     lora_cfg = LoraConfig(
-        r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=0.05, bias="none",
+        r=args.lora_r, lora_alpha=args.lora_alpha,
+        # dropout 0: p>0 makes F.dropout allocate a second copy of the (fp32-
+        # upcast) adapter input inside every checkpoint recompute; SFT does
+        # not need dropout
+        lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
@@ -526,14 +531,24 @@ def main() -> None:
             print(f"resumed LoRA weights from {resume_dir}")
     else:
         try:
-            model = get_peft_model(model, lora_cfg)
+            model = get_peft_model(model, lora_cfg, autocast_adapter_dtype=False)
         except ValueError:
             # newer architectures may rename projections; attach LoRA to all
             # linear layers except the head instead
             if master:
                 print("standard LoRA targets not found; falling back to all-linear")
             lora_cfg.target_modules = "all-linear"
-            model = get_peft_model(model, lora_cfg)
+            model = get_peft_model(model, lora_cfg, autocast_adapter_dtype=False)
+    # LoRA weights in bf16 (NOT peft's fp32 default): with no autocast active,
+    # peft's Linear4bit adapter path casts x to lora_A.weight.dtype on EVERY
+    # adapter call, so fp32 adapters force an fp32 activation copy through all
+    # ~450 adapters — at 12k tokens the down_proj copy alone is 816 MiB, live
+    # in every layer's checkpoint recompute (that is exactly the tensor the
+    # last OOM died allocating). bf16 LoRA is the standard SFT setup; AdamW
+    # state follows the param dtype, halving adapter optimizer memory too.
+    for _p in model.parameters():
+        if _p.requires_grad:
+            _p.data = _p.data.to(torch.bfloat16)
     if master:
         model.print_trainable_parameters()
     model.gradient_checkpointing_enable()
