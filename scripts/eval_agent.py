@@ -34,18 +34,19 @@ def strip_think(text):
     return _THINK_OPEN_RE.sub("", text).strip()
 
 
-def chat(tok, messages):
-    """Chat-template with thinking DISABLED.
-
-    Qwen3.5's default template puts the model in thinking mode (the generation
-    prompt ends with an open think block). With a 512-token budget that burns
-    everything on reasoning and leaves no code, so eval must disable it
-    (same as the distill stage).
-    """
+def chat(tok, messages, enable_thinking=True):
+    """Chat-template. Thinking ON by default: the student is trained on
+    think-wrapped traces, so the gate suites must let it think (epoch-1 ran
+    thinking-suppressed at a 4096 budget and lost ~half its sampled SciCode
+    failures to truncation; the teacher benchmark showed even 40000 tokens
+    truncates 11-45% of SciCode sub-steps). The trajectory-adherence replay
+    and the simulator/demo paths opt OUT (enable_thinking=False): their
+    per-turn budgets are small (400/700) and thinking would burn them before
+    the action JSON / observation, keeping the metric at 0 by construction."""
     try:
         return tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=False)
+            enable_thinking=enable_thinking)
     except TypeError:
         return tok.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True)
@@ -80,12 +81,19 @@ def main() -> None:
     ap.add_argument("--data-dir", type=str, default="distilled")
     ap.add_argument("--humaneval-n", type=int, default=0, help="0 = all 164 problems")
     ap.add_argument("--adherence-n", type=int, default=64)
-    ap.add_argument("--max-tokens", type=int, default=4096,
+    ap.add_argument("--max-tokens", type=int, default=40000,
                     help="generation budget per prompt. Reasoning-distilled "
                          "students emit think-wrapped traces before the "
                          "answer, so small budgets truncate mid-think "
                          "(extracts to empty) or mid-code and read as bogus "
-                         "pass@1 = 0")
+                         "pass@1 = 0. 40000 = the distill sampling budget; "
+                         "the teacher benchmark still truncated 11-45% of "
+                         "SciCode sub-steps at it")
+    ap.add_argument("--temperature", type=float, default=0.6,
+                    help="sampling temperature for the gate suites "
+                         "(Qwen thinking-mode recommendation; greedy loops "
+                         "on thinking models). The adherence replay and "
+                         "demo paths stay at 0")
     ap.add_argument("--scicode-task", type=str, default="", help="upstream scicode_data task id")
     ap.add_argument("--scicode-dir", type=str, default="scicode_test")
     args = ap.parse_args()
@@ -139,7 +147,7 @@ def main() -> None:
         for p in problems
     ]
     sp = llm.get_default_sampling_params()
-    sp.temperature = 0.0
+    sp.temperature = args.temperature
     sp.max_tokens = args.max_tokens
     outs = llm.generate(prompts_, sp, lora_request=lora_req)
 
@@ -231,7 +239,8 @@ def main() -> None:
         live = [t for t in trajectories if not t["done"]]
         if not live:
             break
-        outs = llm.generate([chat(tok, t["messages"]) for t in live],
+        outs = llm.generate([chat(tok, t["messages"], enable_thinking=False)
+                             for t in live],
                             sp_act, lora_request=lora_req)
         obs_jobs = []
         for t, out in zip(live, outs):
@@ -256,7 +265,8 @@ def main() -> None:
         # the training data)
         sim_prompts = [chat(tok, [{"role": "system",
                                    "content": prompts.SIMULATOR_SYSTEM_PROMPT}]
-                            + t["messages"][1:]) for t in obs_jobs]
+                            + t["messages"][1:], enable_thinking=False)
+                       for t in obs_jobs]
         outs = llm.generate(sim_prompts, sp_obs, lora_request=lora_req)
         for t, out in zip(obs_jobs, outs):
             obs = strip_think(out.outputs[0].text).strip()
@@ -304,7 +314,8 @@ def main() -> None:
     sp_demo.max_tokens = 700
     for i, dp in enumerate(demo_prompts):
         ptext = chat(tok, [{"role": "system", "content": system_prompt},
-                           {"role": "user", "content": dp}])
+                           {"role": "user", "content": dp}],
+                     enable_thinking=False)
         out = strip_think(llm.generate([ptext], sp_demo, lora_request=lora_req)[0].outputs[0].text)
         if run:
             run.report_sample(f"task: {dp}\n\nstudent actions:\n{out[:1200]}",
@@ -500,7 +511,7 @@ def run_scicode_eval(args, run, llm, tok, lora_req):
           f"{sum(len(p['sub_steps']) for p in problems)} sub-steps")
 
     sp = llm.get_default_sampling_params()
-    sp.temperature = 0.0
+    sp.temperature = args.temperature
     # the budget must cover the student's think-wrapped traces (learned from
     # think-distill data) PLUS the answer code. A small cap truncates
     # mid-think (extracts to empty) or mid-code (guaranteed test failure);

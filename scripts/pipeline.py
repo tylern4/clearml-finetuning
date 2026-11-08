@@ -302,6 +302,7 @@ def supervised_train(args, ids) -> None:
     if resume:
         st = wait_for(resume, 12 * 3600)
         print(f"resume source {resume}: {st}")
+    first = True
     while True:
         chunk = args.epochs
         if args.max_total_epochs > 0:
@@ -316,7 +317,21 @@ def supervised_train(args, ids) -> None:
         ok = False
         attempt = 0
         partials = 0
-        while attempt <= args.max_train_retries:
+        tid = ""
+        if first and resume and args.eval_resume_source:
+            # --eval-resume-source: the resume source IS the chunk that just
+            # finished training (controller relaunched mid-campaign). Adopt it
+            # and go straight to its gate eval + side GGUF instead of
+            # launching a duplicate chunk on top of it.
+            if st == "completed" and "student-adapter" in task_artifact_names(resume):
+                print(f"  adopting resume source {resume} as finished chunk "
+                      f"(--eval-resume-source)")
+                ids["train"], tid, ok = resume, resume, True
+            else:
+                print(f"  resume source {resume} not adoptable (st={st}, "
+                      f"no final adapter) - launching a chunk that resumes "
+                      f"from it")
+        while not ok and attempt <= args.max_train_retries:
             # rebuild args every attempt: a retry may resume from a different
             # task than the previous attempt (never the dead chunk itself)
             targs = ["--stage", "train", "--epochs", str(chunk),
@@ -367,6 +382,7 @@ def supervised_train(args, ids) -> None:
                       f"{attempt + 1}/{args.max_train_retries + 1} - resuming "
                       f"from last good source {resume or '(scratch)'}")
             attempt += 1
+        first = False
         if not ok:
             raise RuntimeError("train chunk failed after all retries")
         total += chunk
@@ -460,6 +476,12 @@ def main() -> int:
                     help="stop training when the gate metric drops below the best "
                          "value seen so far (the deliverable rewinds to the best "
                          "chunk, not the regressed one)")
+    ap.add_argument("--eval-resume-source", action="store_true",
+                    help="adopt --resume-train as the chunk that just finished "
+                         "training (controller relaunch mid-campaign): wait for "
+                         "it, then run its gate eval + side GGUF and continue "
+                         "the chunk loop from it, instead of launching a "
+                         "duplicate chunk on top of it")
     ap.add_argument("--train-max-len", type=int, default=0,
                     help="token window passed to the train stage (--max-len); "
                          "0 keeps the stage default. Lower this (e.g. 24576) "
