@@ -325,6 +325,8 @@ def supervised_train(args, ids) -> None:
                      "--epoch-offset", str(total)]
             if args.extra_data:
                 targs += ["--extra-data", args.extra_data]
+            if args.train_max_len:
+                targs += ["--max-len", str(args.train_max_len)]
             tid, st = try_stage("train", targs)
             arts = task_artifact_names(tid)
             if "student-adapter" in arts:
@@ -455,6 +457,10 @@ def main() -> int:
                     help="stop training when the gate metric drops below the best "
                          "value seen so far (the deliverable rewinds to the best "
                          "chunk, not the regressed one)")
+    ap.add_argument("--train-max-len", type=int, default=0,
+                    help="token window passed to the train stage (--max-len); "
+                         "0 keeps the stage default. Lower this (e.g. 24576) "
+                         "when long think rows OOM the 40GB A100s")
     ap.add_argument("--no-side-gguf", action="store_true",
                     help="skip the parallel convert_gguf side task at each eval point")
     ap.add_argument("--all", action="store_true")
@@ -475,6 +481,8 @@ def main() -> int:
     distill_args = ["--stage", "distill"]
     scicode_args = ["--stage", "scicode_data"]
     train_args = ["--stage", "train", "--epochs", str(args.epochs)]
+    if args.train_max_len:
+        train_args += ["--max-len", str(args.train_max_len)]
     eval_args = ["--stage", "eval"]
 
     if args.only:
