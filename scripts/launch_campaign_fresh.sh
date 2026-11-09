@@ -27,7 +27,7 @@ export CML_PROJECT=clearml-finetuning/qwen3.8-coder CLEARML_QUEUE=muller
 exec /pscratch/sd/t/tylern/scratch/clearml/.venv/bin/python -u scripts/pipeline.py \
   --from train \
   --upstream-scicode 767a204874474482abeab877586d032a \
-  --extra-data "s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/glm-5.3-flash.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/mistral-large-4.jsonl" \
+  --extra-data "s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/glm-5.3-flash.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/mistral-large-4.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-glm-5.3-flash.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-glm-5.3-flash_b2.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-glm-5.3-flash_b3.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-mistral-large-4.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-mistral-large-4_b2.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/ocr-mistral-large-4_b3.jsonl" \
   --epochs 1 --max-total-epochs 12 --train-max-len 16384 \
   --eval-gate eval/scicode_sub_pass1 --eval-gate-min 0.25 \
   --eval-guard eval/pass1 --eval-guard-min 0.85 \
