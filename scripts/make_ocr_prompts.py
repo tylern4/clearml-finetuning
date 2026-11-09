@@ -70,10 +70,11 @@ def main() -> int:
     rng = random.Random(args.seed)
     exclude = set()
     if args.exclude:
-        for line in open(args.exclude):
-            tid = (json.loads(line).get("meta") or {}).get("task_id")
-            if tid:
-                exclude.add(tid)
+        for path in args.exclude.split(","):
+            for line in open(path.strip()):
+                tid = (json.loads(line).get("meta") or {}).get("task_id")
+                if tid:
+                    exclude.add(tid)
         print(f"excluding {len(exclude)} already-used ids from {args.exclude}")
     picked, seen, cap_cf = [], set(), int(args.n * args.max_source_frac)
     n_cf, scanned = 0, 0
