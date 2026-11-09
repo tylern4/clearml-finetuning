@@ -52,6 +52,9 @@ def main() -> int:
     ap.add_argument("--stream-scan", type=int, default=60000,
                     help="max rows to scan before giving up on --n")
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--exclude", default="",
+                    help="problem-set jsonl whose meta.task_id values must "
+                         "not be picked again (disjoint follow-up batches)")
     ap.add_argument("--out", default="ocr_problem_set.jsonl")
     args = ap.parse_args()
 
@@ -65,6 +68,13 @@ def main() -> int:
         pass
 
     rng = random.Random(args.seed)
+    exclude = set()
+    if args.exclude:
+        for line in open(args.exclude):
+            tid = (json.loads(line).get("meta") or {}).get("task_id")
+            if tid:
+                exclude.add(tid)
+        print(f"excluding {len(exclude)} already-used ids from {args.exclude}")
     picked, seen, cap_cf = [], set(), int(args.n * args.max_source_frac)
     n_cf, scanned = 0, 0
     for r in ds:
@@ -74,7 +84,8 @@ def main() -> int:
         if r["difficulty"] not in (None, "") and not keep(r["difficulty"]):
             continue
         text = (r["input"] or "").strip()
-        if not text or len(text) > args.max_input_chars or r["id"] in seen:
+        if not text or len(text) > args.max_input_chars \
+                or r["id"] in seen or r["id"] in exclude:
             continue
         if r["source"] == "codeforces":
             if n_cf >= cap_cf:
