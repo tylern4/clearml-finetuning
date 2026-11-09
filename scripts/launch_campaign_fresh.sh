@@ -28,7 +28,7 @@ exec /pscratch/sd/t/tylern/scratch/clearml/.venv/bin/python -u scripts/pipeline.
   --from train \
   --upstream-scicode 767a204874474482abeab877586d032a \
   --extra-data "s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/glm-5.3-flash.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/mistral-large-4.jsonl" \
-  --epochs 1 --max-total-epochs 12 --train-max-len 12288 \
+  --epochs 1 --max-total-epochs 12 --train-max-len 16384 \
   --eval-gate eval/scicode_sub_pass1 --eval-gate-min 0.25 \
   --eval-guard eval/pass1 --eval-guard-min 0.85 \
   --stop-on-eval-decrease --max-train-retries 2
