@@ -291,14 +291,19 @@ def supervised_train(args, ids) -> None:
 
     Chunks resume LoRA from the previous chunk's adapter. Stop when either
     --max-total-epochs is reached or --eval-gate metric >= --eval-gate-min
-    after a chunk. A failed chunk is retried (up to --max-train-retries)
-    resuming from its latest checkpoint artifact.
+    after a chunk. --eval-guard (e.g. eval/pass1) is a coding collapse guard:
+    training stops if it ever falls below --eval-guard-min. A failed chunk is
+    retried (up to --max-train-retries) resuming from its latest checkpoint
+    artifact.
     """
     total = args.epoch_offset
     resume = args.resume_train
     best_val = None       # best gate value seen so far (any chunk)
     best_train = ""       # train task id that produced best_val
     best_total = 0        # epoch count at best_val
+    best_guard = None     # best coding-guard value seen so far (any chunk)
+    best_guard_train = ""  # train task id that produced best_guard
+    best_guard_total = 0  # epoch count at best_guard
     if resume:
         st = wait_for(resume, 12 * 3600)
         print(f"resume source {resume}: {st}")
@@ -427,6 +432,33 @@ def supervised_train(args, ids) -> None:
                         ids["train"] = best_train
                         print(f"  deliverable rewinds to epoch{best_total} ({best_train})")
                     return
+
+                if args.eval_guard:
+                    # coding collapse guard (e.g. eval/pass1): the gate drives
+                    # training toward a target, the guard protects the primary
+                    # skill - if it ever falls below the floor, stop and rewind
+                    # the deliverable to the chunk with the best guard value
+                    gval = get_scalar(eval_id, args.eval_guard)
+                    print(f"  guard {args.eval_guard} = {gval} "
+                          f"(floor {args.eval_guard_min or 'off'})")
+                    if gval is not None and (best_guard is None or gval > best_guard):
+                        best_guard, best_guard_train, best_guard_total = \
+                            gval, ids["train"], total
+                        print(f"  new best guard value: {gval} (epoch{total})")
+                    if (args.eval_guard_min > 0 and gval is not None
+                            and gval < args.eval_guard_min):
+                        print(f"  coding GUARD tripped: {args.eval_guard}={gval} < "
+                              f"{args.eval_guard_min} (epoch{total}) - stopping training")
+                        add_tags(eval_id, ["coding-guard-fail"])
+                        add_tags(tid, ["coding-guard-fail"])
+                        collect_gguf(gguf_id, total)
+                        if gguf_id:
+                            ids["side_gguf"] = gguf_id
+                        if best_guard_train:
+                            ids["train"] = best_guard_train
+                            print(f"  deliverable rewinds to epoch{best_guard_total} "
+                                  f"({best_guard_train})")
+                        return
             # collect the side GGUF before moving on (usually already done,
             # it runs alongside eval); failure never gates training
             collect_gguf(gguf_id, total)
@@ -467,6 +499,13 @@ def main() -> int:
                          "e.g. eval/scicode_main_pass1 or eval/pass1")
     ap.add_argument("--eval-gate-min", type=float, default=0.0,
                     help="stop training when --eval-gate >= this value")
+    ap.add_argument("--eval-guard", default="",
+                    help="coding collapse guard: a second ClearML scalar (e.g. "
+                         "eval/pass1) checked after each gate eval; training stops "
+                         "if it ever falls below --eval-guard-min, and the "
+                         "deliverable rewinds to the chunk with the best guard value")
+    ap.add_argument("--eval-guard-min", type=float, default=0.0,
+                    help="floor for --eval-guard; 0 disables the floor check")
     ap.add_argument("--max-train-retries", type=int, default=2,
                     help="retries per train chunk on failure (resumes from checkpoint)")
     ap.add_argument("--extra-data", default="",

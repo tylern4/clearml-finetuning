@@ -39,8 +39,10 @@ any reported scalar (e.g. `--eval-gate eval/scicode_main_pass1
 The active campaign (`scripts/launch_campaign_fresh.sh`) self-distills
 `Qwen/Qwen3.8-27B` (teacher = student): the trajectory JSONLs distilled from
 the served teachers (glm-5.3-flash, mistral-large-4) enter through
-`--extra-data`, and the gate is `eval/scicode_main_pass1 >= 0.05` — both
-teachers score 1.5% / 10.8% on that metric, so the gate sits below them.
+`--extra-data`. The gate drives training toward `eval/scicode_sub_pass1 >=
+0.25` (granular sub-step metric; teachers score 0.30 / 0.36),
+`--eval-guard eval/pass1 --eval-guard-min 0.85` stops the campaign if coding
+collapses, and `--stop-on-eval-decrease` stops on gate-metric regression.
 
 ## Layout
 

@@ -8,8 +8,14 @@
 #   data  = the two S3 teacher JSONLs below (pinned objects, produced by
 #           teacher_eval/teacher_eval.py runs against the teachers' serving
 #           endpoints) + registered SciCode test task 767a2048
-#   gate  = eval/scicode_main_pass1 >= 0.05 (teachers score 1.5% glm /
-#           10.8% mistral on this metric; 0.15 exceeded every teacher)
+#   gate  = eval/scicode_sub_pass1 >= 0.25 - science-progress target on the
+#           granular sub-step metric (teachers: 0.299 glm / 0.364 mistral;
+#           main-resolved is all-or-nothing on 65 problems and its old 0.05
+#           target sat above the glm teacher)
+#   guard = eval/pass1 >= 0.85 floor - the campaign optimizes science, the
+#           guard stops it if coding ever collapses (deliverable rewinds to
+#           the best-coding epoch); --stop-on-eval-decrease additionally
+#           stops on gate-metric regression (overfitting)
 #   eval  = thinking-mode, 40000 tokens, temp 0.6 (Qwen thinking recommendation)
 #
 # Secrets come from .env at the repo root (gitignored). Run with:
@@ -23,5 +29,6 @@ exec /pscratch/sd/t/tylern/scratch/clearml/.venv/bin/python -u scripts/pipeline.
   --upstream-scicode 767a204874474482abeab877586d032a \
   --extra-data "s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/glm-5.3-flash.jsonl,s3://s3-bucket-loadbalancer.das-redpanda.production.svc.spin.nersc.org:5432/dasml/clearml/remote_distills/mistral-large-4.jsonl" \
   --epochs 1 --max-total-epochs 12 --train-max-len 12288 \
-  --eval-gate eval/scicode_main_pass1 --eval-gate-min 0.05 \
+  --eval-gate eval/scicode_sub_pass1 --eval-gate-min 0.25 \
+  --eval-guard eval/pass1 --eval-guard-min 0.85 \
   --stop-on-eval-decrease --max-train-retries 2
