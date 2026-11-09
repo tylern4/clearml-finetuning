@@ -199,6 +199,13 @@ def main() -> None:
                          "1024 the logits+softmax+grad transient OOM'd the "
                          "16384-token window. 0 disables chunking (stock "
                          "HF loss)")
+    ap.add_argument("--mlp-chunk-tokens", type=int, default=1024,
+                    help="token-chunk the qwen3_5 MLP forward with a nested "
+                         "checkpoint per chunk: bounds the per-layer backward "
+                         "recompute transient (gate/up/act/product are 544 "
+                         "MiB each at seq 16384, ~2.2 GiB live per layer "
+                         "recompute -- the tensor the 40GB OOM died on) to "
+                         "one chunk. 0 = stock MLP")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -220,6 +227,43 @@ def main() -> None:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
+
+    # ---- memory: token-chunked MLP ------------------------------------------
+    # Qwen3_5MLP.materializes four full-size bf16 intermediates per call
+    # (gate_proj out, act, up_proj out, product: seq x 17408 = 544 MiB each
+    # at the 16384-token window) plus the LoRA branch outputs. Under the
+    # per-layer gradient checkpoint those are REBUILT during every layer's
+    # backward recompute (~2.2 GiB live per recompute) -- that transient is
+    # what OOM'd the 40GB cards (the 544 MiB lora_B allocation in the
+    # up_proj recompute). Chunking the MLP over the token dim with a nested
+    # checkpoint per chunk bounds it to one chunk (~0.3 GiB at 1024); the
+    # math is unchanged (row-independent GEMMs + elementwise ops), cost is
+    # one extra MLP pass per step.
+    def _chunked_mlp_forward(self, x):
+        chunk = getattr(self, "_mlp_chunk_tokens", 0)
+        n = x.shape[-2]
+        if not chunk or n <= chunk:
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        outs = []
+        for i in range(0, n, chunk):
+            outs.append(torch.utils.checkpoint.checkpoint(
+                lambda xc_: self.down_proj(
+                    self.act_fn(self.gate_proj(xc_)) * self.up_proj(xc_)),
+                x[..., i:i + chunk, :], use_reentrant=False))
+        return torch.cat(outs, dim=-2)
+
+    try:
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as _q35m
+        _q35m.Qwen3_5MLP.forward = _chunked_mlp_forward
+        _q35m.Qwen3_5MLP._mlp_chunk_tokens = args.mlp_chunk_tokens
+        if master and args.mlp_chunk_tokens:
+            print(f"qwen3_5 MLP: token-chunked forward "
+                  f"({args.mlp_chunk_tokens} tokens/chunk, nested ckpt)",
+                  flush=True)
+    except Exception as e:
+        if master:
+            print(f"qwen3_5 MLP chunking not applied "
+                  f"({type(e).__name__}: {e})", flush=True)
 
     tok = AutoTokenizer.from_pretrained(args.student)
 
