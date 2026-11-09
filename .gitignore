@@ -11,3 +11,4 @@ gguf_convert_*.out
 remote_distill_*.jsonl
 remote_tasks_*.jsonl
 remote_tasks_*.transcripts.jsonl
+ocr_problem_set.jsonl
