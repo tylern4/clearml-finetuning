@@ -648,7 +648,30 @@ def main() -> None:
                 continue
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
-            out_loss = model(input_ids=input_ids, attention_mask=attn, labels=labels)
+            try:
+                out_loss = model(input_ids=input_ids, attention_mask=attn, labels=labels)
+            except torch.cuda.OutOfMemoryError as e:
+                # the 16384-token window makes the longest micro-batches far
+                # heavier than the rest; a 40GB card can OOM in the forward
+                out_loss = None
+                print(f"rank {rank}: CUDA OOM in forward: "
+                      f"{str(e).splitlines()[0]}", flush=True)
+            if is_ddp:
+                # ALL ranks must skip the micro-batch together: a single-rank
+                # skip would desync DDP's backward allreduce and hang the job
+                oom_t = torch.tensor([0 if out_loss is not None else 1],
+                                     device=device, dtype=torch.int32)
+                dist.all_reduce(oom_t, op=dist.ReduceOp.MAX)
+                if oom_t.item():
+                    out_loss = None
+            if out_loss is None:
+                if master:
+                    print(f"step {step} micro {mi}: CUDA OOM in forward "
+                          f"(~{int(attn.sum().item())} tokens); skipping "
+                          f"micro-batch on all ranks", flush=True)
+                del input_ids, labels, attn
+                torch.cuda.empty_cache()
+                continue
             loss = out_loss / args.grad_accum
             if not torch.isfinite(loss):
                 # non-finite loss would poison the weights via NaN grads; skip

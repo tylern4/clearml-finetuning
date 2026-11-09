@@ -211,6 +211,17 @@ def main() -> None:
             sys.stdout.flush()
         rc = proc.wait()
     if rc != 0:
+        # the failing child rank's own traceback (e.g. a per-rank CUDA OOM)
+        # can be lost in torchrun's shutdown sequence; make sure the tail of
+        # the full stage log reaches the task console before we raise
+        try:
+            with open(stage_log, errors="replace") as lf:
+                tail = lf.readlines()[-150:]
+            print("---- stage log tail (on failure) ----", flush=True)
+            sys.stdout.writelines(tail)
+            sys.stdout.flush()
+        except OSError as e:
+            print(f"(could not re-read stage log: {e})", flush=True)
         raise RuntimeError(f"stage '{stage}' script failed with exit code {rc}; "
                            f"full log: {stage_log}")
     print(f"stage '{stage}' complete")
