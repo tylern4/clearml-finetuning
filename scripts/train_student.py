@@ -189,12 +189,16 @@ def main() -> None:
                          "Reasoning rows (think-wrapped traces) need the raise: "
                          "at 2048 the answer tail is cut and the row is dropped "
                          "as unsupervised")
-    ap.add_argument("--ce-chunk-tokens", type=int, default=1024,
+    ap.add_argument("--ce-chunk-tokens", type=int, default=256,
                     help="chunked-CE granularity: lm_head+cross-entropy run "
                          "over this many supervised tokens at a time so the "
                          "full [seq, vocab] logits tensor is never built "
-                         "(1024 -> ~0.9 GiB fp32 logits per chunk on the "
-                         "248k vocab). 0 disables chunking (stock HF loss)")
+                         "(256 -> ~0.15 GiB fp32 logits per chunk on the "
+                         "248k vocab). The backward recompute of the largest "
+                         "chunk is a peak-memory driver on 40GB cards: at "
+                         "1024 the logits+softmax+grad transient OOM'd the "
+                         "16384-token window. 0 disables chunking (stock "
+                         "HF loss)")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -564,7 +568,25 @@ def main() -> None:
         model = DDP(model, device_ids=[local], output_device=local)
 
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0, betas=(0.9, 0.95))
+    try:
+        # 8-bit AdamW moments (vs torch's bf16 states on the bf16 LoRA
+        # params) shave ~0.3-0.4 GiB off the resident footprint and drop
+        # the foreach step's temporary tensors -- on 40GB cards the 16k-
+        # token backwards run within ~1 GiB of the limit, so that headroom
+        # matters. Any bitsandbytes failure falls back to stock AdamW.
+        import bitsandbytes as bnb
+
+        opt = bnb.optim.AdamW8bit(params, lr=args.lr, weight_decay=0.0,
+                                  betas=(0.9, 0.95))
+        if master:
+            print("optimizer: bitsandbytes AdamW8bit "
+                  f"({len(params)} param tensors)", flush=True)
+    except Exception as e:  # ImportError, or init failure (no CUDA, etc.)
+        opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0,
+                                betas=(0.9, 0.95))
+        if master:
+            print(f"optimizer: torch AdamW (bitsandbytes unavailable: "
+                  f"{type(e).__name__}: {e})", flush=True)
 
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
 
@@ -696,6 +718,11 @@ def main() -> None:
                 else:
                     opt.step()
                     opt.zero_grad(set_to_none=True)
+                # release the boundary's cached-but-unallocated segments
+                # before the next micro-batch's backward maps fresh pages;
+                # expandable_segments keeps ~0.5 GiB stranded in the cache
+                # after optimizer work, and the next backward may need it
+                torch.cuda.empty_cache()
                 if master:
                     dt = time.time() - t0
                     t0 = time.time()
