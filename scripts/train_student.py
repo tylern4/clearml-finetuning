@@ -301,14 +301,15 @@ def main() -> None:
     def _apply_segment_checkpointing(peft_model, k):
         from transformers.models.qwen3_5 import modeling_qwen3_5 as _q35m_seg
 
-        text_model = None
-        for _m in peft_model.modules():
-            if isinstance(_m, _q35m_seg.Qwen3_5TextModel):
-                text_model = _m
-                break
-        if text_model is None:
+        hits = [m for m in peft_model.modules()
+                if isinstance(m, _q35m_seg.Qwen3_5TextModel)]
+        if not hits:
             raise RuntimeError(
                 "segment checkpointing: no Qwen3_5TextModel found in model")
+        for _m in hits:
+            _m._segment_ckpt_k = int(k)
+            _m._seg_calls = 0
+            _m._seg_trace = bool(master)  # per-segment alloc trace: rank0 only
         _orig_text_forward = _q35m_seg.Qwen3_5TextModel.forward
 
         def _segmented_text_forward(self, input_ids=None, attention_mask=None,
@@ -317,6 +318,14 @@ def main() -> None:
                                     **kwargs):
             k_ = getattr(self, "_segment_ckpt_k", 0)
             if not (k_ and self.training):
+                if (self.training and not k_
+                        and not getattr(type(self), "_fallback_warned", False)):
+                    # a silent fallback here means NO activation checkpointing
+                    # at all (per-layer is disabled) -> guaranteed OOM; loud
+                    type(self)._fallback_warned = True
+                    print(f"WARNING segment-ckpt: TRAINING forward fell back "
+                          f"to stock (k={k_!r}, id={id(self) % 100000}) -- "
+                          f"expect OOM", flush=True)
                 # eval / generate / k=0: exact stock behavior
                 return _orig_text_forward(
                     self, input_ids=input_ids, attention_mask=attention_mask,
@@ -324,6 +333,15 @@ def main() -> None:
                     past_key_values=past_key_values,
                     inputs_embeds=inputs_embeds, use_cache=use_cache,
                     **kwargs)
+
+            self._seg_calls = getattr(self, "_seg_calls", 0) + 1
+            _trace = (getattr(self, "_seg_trace", False)
+                      and self._seg_calls == 1)
+            if _trace:
+                _fr, _tot = torch.cuda.mem_get_info()
+                print(f"seg-ckpt fwd#1 enter: alloc "
+                      f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, dev "
+                      f"free {_fr/2**30:.2f}/{_tot/2**30:.2f}", flush=True)
 
             # ---- upstream Qwen3_5TextModel.forward prologue, verbatim ----
             # (the @capture_outputs/@merge_with_config_defaults decorators
@@ -389,8 +407,17 @@ def main() -> None:
                         )
                     return hs
 
+                if _trace:
+                    print(f"  seg {s0:2d}: pre-ckpt alloc "
+                          f"{torch.cuda.memory_allocated()/2**30:.2f} GiB",
+                          flush=True)
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     run_seg, hidden_states, use_reentrant=False)
+                if _trace:
+                    _fr, _tot = torch.cuda.mem_get_info()
+                    print(f"  seg {s0:2d}: post alloc "
+                          f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, "
+                          f"dev free {_fr/2**30:.2f}", flush=True)
 
             hidden_states = self.norm(hidden_states)
             return _q35m_seg.Qwen3_5ModelOutputWithPast(
@@ -399,13 +426,14 @@ def main() -> None:
             )
 
         _q35m_seg.Qwen3_5TextModel.forward = _segmented_text_forward
-        text_model._segment_ckpt_k = int(k)
+        _q35m_seg.Qwen3_5TextModel._fallback_warned = False
         if master:
-            n_layers = len(text_model.layers)
+            n_layers = len(hits[0].layers)
             n_frames = (n_layers + int(k) - 1) // int(k)
             print(f"segment checkpointing: every {k} of {n_layers} layers "
                   f"({n_frames} frames, stash {n_layers}x160 MiB -> "
-                  f"{n_frames}x160 MiB; per-layer checkpointing disabled)",
+                  f"{n_frames}x160 MiB; per-layer checkpointing disabled; "
+                  f"{len(hits)} text-model instance(s))",
                   flush=True)
 
     tok = AutoTokenizer.from_pretrained(args.student)
@@ -834,6 +862,7 @@ def main() -> None:
               f"(already trained in the resumed checkpoint) before training",
               flush=True)
     _ff_cache_flushed = False
+    _ff_probe = _bw_probe = True  # one-time first-real-step memory probes
     for epoch in range(args.epochs):
         rng = torch.Generator().manual_seed(1234 + epoch + args.epoch_offset)
         order = torch.randperm(len(all_mb), generator=rng).tolist()
@@ -870,6 +899,13 @@ def main() -> None:
                 _ff_cache_flushed = True
                 gc.collect()
                 torch.cuda.empty_cache()
+                if master:
+                    _fr, _tot = torch.cuda.mem_get_info()
+                    print(f"mem probe pre-fwd: alloc "
+                          f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, "
+                          f"reserved {torch.cuda.memory_reserved()/2**30:.2f}, "
+                          f"dev free {_fr/2**30:.2f}/{_tot/2**30:.2f}",
+                          flush=True)
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
             try:
@@ -880,6 +916,13 @@ def main() -> None:
                 out_loss = None
                 print(f"rank {rank}: CUDA OOM in forward: "
                       f"{str(e).splitlines()[0]}", flush=True)
+            if master and _ff_probe:
+                _ff_probe = False
+                _fr, _tot = torch.cuda.mem_get_info()
+                print(f"mem probe post-fwd: alloc "
+                      f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, max "
+                      f"{torch.cuda.max_memory_allocated()/2**30:.2f}, dev "
+                      f"free {_fr/2**30:.2f}", flush=True)
             if is_ddp:
                 # ALL ranks must skip the micro-batch together: a single-rank
                 # skip would desync DDP's backward allreduce and hang the job
@@ -906,6 +949,13 @@ def main() -> None:
                 opt.zero_grad(set_to_none=True)
                 continue
             loss.backward()
+            if master and _bw_probe:
+                _bw_probe = False
+                _fr, _tot = torch.cuda.mem_get_info()
+                print(f"mem probe post-bwd: alloc "
+                      f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, max "
+                      f"{torch.cuda.max_memory_allocated()/2**30:.2f}, dev "
+                      f"free {_fr/2**30:.2f}", flush=True)
             accum_loss += loss.item()
             tokens_seen += int(attn.sum().item())
             if boundary:
