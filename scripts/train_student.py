@@ -6,6 +6,7 @@ schedule, gradient accumulation. Saves the adapter as a ClearML artifact.
 """
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -14,6 +15,14 @@ import signal
 import sys
 import time
 from datetime import timedelta
+
+# Shrink the non-PyTorch CUDA pool BEFORE torch import / NCCL init.
+# Two resumed runs died at the first post-fast-forward steps with
+# "expandable_segments: memory mapping failed ... free: 2-12 MB" on 39.49 GiB
+# cards: physical exhaustion, ~5.5 GiB of it outside PyTorch (mostly NCCL
+# channel buffers). Fewer/narrower channels claw back 1-2 GiB per rank.
+os.environ.setdefault("NCCL_MIN_NCHANNELS", "4")
+os.environ.setdefault("NCCL_BUFFSIZE", "2097152")  # 2 MiB chunks (default 4 MiB)
 
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
@@ -684,6 +693,7 @@ def main() -> None:
         print(f"fast-forward: replaying the data schedule through step {ff_step} "
               f"(already trained in the resumed checkpoint) before training",
               flush=True)
+    _ff_cache_flushed = False
     for epoch in range(args.epochs):
         rng = torch.Generator().manual_seed(1234 + epoch + args.epoch_offset)
         order = torch.randperm(len(all_mb), generator=rng).tolist()
@@ -712,6 +722,14 @@ def main() -> None:
                     if master and step % 20 == 0:
                         print(f"fast-forward {step}/{ff_step}", flush=True)
                 continue
+            if not _ff_cache_flushed:
+                # First real (post-fast-forward) step on a resumed run: return
+                # the checkpoint-load phase's stranded cached blocks to the
+                # driver before the longest micro-batches map pages -- the
+                # resume-window OOMs were mapping failures with <20 MB free.
+                _ff_cache_flushed = True
+                gc.collect()
+                torch.cuda.empty_cache()
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
             try:
