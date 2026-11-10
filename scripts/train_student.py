@@ -199,7 +199,7 @@ def main() -> None:
                          "1024 the logits+softmax+grad transient OOM'd the "
                          "16384-token window. 0 disables chunking (stock "
                          "HF loss)")
-    ap.add_argument("--mlp-chunk-tokens", type=int, default=1024,
+    ap.add_argument("--mlp-chunk-tokens", type=int, default=512,
                     help="token-chunk the qwen3_5 MLP forward with a nested "
                          "checkpoint per chunk: bounds the per-layer backward "
                          "recompute transient (gate/up/act/product are 544 "
