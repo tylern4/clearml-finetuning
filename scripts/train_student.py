@@ -863,6 +863,7 @@ def main() -> None:
               flush=True)
     _ff_cache_flushed = False
     _ff_probe = _bw_probe = True  # one-time first-real-step memory probes
+    _fwd_probe = True
     for epoch in range(args.epochs):
         rng = torch.Generator().manual_seed(1234 + epoch + args.epoch_offset)
         order = torch.randperm(len(all_mb), generator=rng).tolist()
@@ -899,15 +900,23 @@ def main() -> None:
                 _ff_cache_flushed = True
                 gc.collect()
                 torch.cuda.empty_cache()
-                if master:
-                    _fr, _tot = torch.cuda.mem_get_info()
-                    print(f"mem probe pre-fwd: alloc "
-                          f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, "
-                          f"reserved {torch.cuda.memory_reserved()/2**30:.2f}, "
-                          f"dev free {_fr/2**30:.2f}/{_tot/2**30:.2f}",
-                          flush=True)
+                _fr, _tot = torch.cuda.mem_get_info()
+                # every rank: a full card HERE means an external occupant or a
+                # leaked context on this GPU, not our forward (which has not
+                # run yet)
+                print(f"mem probe pre-fwd r{rank}: alloc "
+                      f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, "
+                      f"reserved {torch.cuda.memory_reserved()/2**30:.2f}, "
+                      f"dev free {_fr/2**30:.2f}/{_tot/2**30:.2f}",
+                      flush=True)
             input_ids, labels, attn = collate(mb)
             input_ids, labels, attn = (input_ids.to(device), labels.to(device), attn.to(device))
+            if _ff_probe:
+                # every rank: is the danger batch long (padded ~16384) or is
+                # rank3's card occupied from outside? decisive either way
+                _ff_probe = False
+                print(f"rank {rank} micro 1: padded {tuple(input_ids.shape)}, "
+                      f"tokens {int(attn.sum().item())}", flush=True)
             try:
                 out_loss = model(input_ids=input_ids, attention_mask=attn, labels=labels)
             except torch.cuda.OutOfMemoryError as e:
@@ -916,8 +925,8 @@ def main() -> None:
                 out_loss = None
                 print(f"rank {rank}: CUDA OOM in forward: "
                       f"{str(e).splitlines()[0]}", flush=True)
-            if master and _ff_probe:
-                _ff_probe = False
+            if master and _fwd_probe:
+                _fwd_probe = False
                 _fr, _tot = torch.cuda.mem_get_info()
                 print(f"mem probe post-fwd: alloc "
                       f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, max "
@@ -949,10 +958,10 @@ def main() -> None:
                 opt.zero_grad(set_to_none=True)
                 continue
             loss.backward()
-            if master and _bw_probe:
+            if _bw_probe:
                 _bw_probe = False
                 _fr, _tot = torch.cuda.mem_get_info()
-                print(f"mem probe post-bwd: alloc "
+                print(f"mem probe post-bwd r{rank}: alloc "
                       f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, max "
                       f"{torch.cuda.max_memory_allocated()/2**30:.2f}, dev "
                       f"free {_fr/2**30:.2f}", flush=True)
