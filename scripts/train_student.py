@@ -215,6 +215,16 @@ def main() -> None:
                          "MiB each at seq 16384, ~2.2 GiB live per layer "
                          "recompute -- the tensor the 40GB OOM died on) to "
                          "one chunk. 0 = stock MLP")
+    ap.add_argument("--segment-ckpt-layers", type=int, default=4,
+                    help="segment gradient checkpointing: checkpoint the text "
+                         "backbone every N layers instead of every layer. "
+                         "Stock per-layer checkpointing saves ALL 64 layer "
+                         "inputs through backward (160 MiB each at seq 16384 "
+                         "= 10.7 GiB) and the config runs at ~39.4/39.5 GiB, "
+                         "so resumed runs OOM with nothing left to free; "
+                         "every-4th-layer saves 2.7 GiB of stash for one "
+                         "~2 GiB segment-recompute transient -- net ~6 GiB, "
+                         "same 2x compute. 0 = stock per-layer checkpointing")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -273,6 +283,130 @@ def main() -> None:
         if master:
             print(f"qwen3_5 MLP chunking not applied "
                   f"({type(e).__name__}: {e})", flush=True)
+
+    # ---- memory: segment gradient checkpointing -------------------------------
+    # Stock per-layer checkpointing saves EVERY layer's input through the whole
+    # backward (64 layers x 160 MiB bf16 at the 16384-token window = 10.7 GiB
+    # held resident). Total demand runs ~39.4 of 39.5 GiB, so a warm original
+    # run survives on mapping-order luck while cold resumed runs OOM at the
+    # first post-resume steps with "free: 2-12 MB" -- retrying cannot fix a
+    # structural deficit. Checkpointing every k-th layer keeps only
+    # n_layers/k stashes (2.7 GiB at k=4) at the cost of one k-layer recompute
+    # transient (~2 GiB): net ~6 GiB freed with IDENTICAL compute (2x), as
+    # long as per-layer checkpointing stays off inside the segments (nesting
+    # would make it 3x and rebuild the full stash). Applied as a class-level
+    # forward patch on Qwen3_5TextModel, same style as the MLP chunk patch:
+    # the segment path copies the upstream prologue verbatim and swaps the
+    # layer loop for k-layer checkpoint frames.
+    def _apply_segment_checkpointing(peft_model, k):
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as _q35m_seg
+
+        text_model = None
+        for _m in peft_model.modules():
+            if isinstance(_m, _q35m_seg.Qwen3_5TextModel):
+                text_model = _m
+                break
+        if text_model is None:
+            raise RuntimeError(
+                "segment checkpointing: no Qwen3_5TextModel found in model")
+        _orig_text_forward = _q35m_seg.Qwen3_5TextModel.forward
+
+        def _segmented_text_forward(self, input_ids=None, attention_mask=None,
+                                    position_ids=None, past_key_values=None,
+                                    inputs_embeds=None, use_cache=None,
+                                    **kwargs):
+            k_ = getattr(self, "_segment_ckpt_k", 0)
+            if not (k_ and self.training):
+                # eval / generate / k=0: exact stock behavior
+                return _orig_text_forward(
+                    self, input_ids=input_ids, attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds, use_cache=use_cache,
+                    **kwargs)
+
+            # ---- upstream Qwen3_5TextModel.forward prologue, verbatim ----
+            # (the @capture_outputs/@merge_with_config_defaults decorators
+            # are unused in this training path: kwargs are empty and the
+            # trunk is called with use_cache=False, past_key_values=None)
+            if (input_ids is None) ^ (inputs_embeds is not None):
+                raise ValueError(
+                    "You must specify exactly one of input_ids or inputs_embeds")
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_tokens(input_ids)
+            if use_cache and past_key_values is None:
+                past_key_values = _q35m_seg.DynamicCache(config=self.config)
+            # the hard coded `4` is for text, temporal, height and width.
+            if position_ids is None:
+                past_seen_tokens = (past_key_values.get_seq_length()
+                                    if past_key_values is not None else 0)
+                position_ids = (torch.arange(inputs_embeds.shape[1],
+                                             device=inputs_embeds.device)
+                                + past_seen_tokens)
+                position_ids = position_ids.view(1, 1, -1).expand(
+                    4, inputs_embeds.shape[0], -1)
+            elif position_ids.ndim == 2:
+                position_ids = position_ids[None, ...].expand(
+                    4, position_ids.shape[0], -1)
+            if position_ids.ndim == 3 and position_ids.shape[0] == 4:
+                text_position_ids = position_ids[0]
+                position_ids = position_ids[1:]
+            else:
+                text_position_ids = None
+            if not isinstance(causal_mask_mapping := attention_mask, dict):
+                mask_kwargs = {
+                    "config": self.config,
+                    "inputs_embeds": inputs_embeds,
+                    "attention_mask": attention_mask,
+                    "past_key_values": past_key_values,
+                    "position_ids": text_position_ids,
+                }
+                causal_mask_mapping = {
+                    "full_attention": _q35m_seg.create_causal_mask(**mask_kwargs),
+                    "linear_attention": _q35m_seg.create_recurrent_attention_mask(
+                        **mask_kwargs),
+                }
+
+            hidden_states = inputs_embeds
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+            # ---- layer loop -> k-layer checkpoint frames ------------------
+            layers = self.layers[: self.config.num_hidden_layers]
+            for s0 in range(0, len(layers), k_):
+                seg = layers[s0 : s0 + k_]
+
+                def run_seg(hs, _seg=seg, _s0=s0):
+                    for j, _layer in enumerate(_seg):
+                        hs = _layer(
+                            hs,
+                            position_embeddings=position_embeddings,
+                            attention_mask=causal_mask_mapping[
+                                self.config.layer_types[_s0 + j]],
+                            position_ids=text_position_ids,
+                            past_key_values=past_key_values,
+                            use_cache=use_cache,
+                            **kwargs,
+                        )
+                    return hs
+
+                hidden_states = torch.utils.checkpoint.checkpoint(
+                    run_seg, hidden_states, use_reentrant=False)
+
+            hidden_states = self.norm(hidden_states)
+            return _q35m_seg.Qwen3_5ModelOutputWithPast(
+                last_hidden_state=hidden_states,
+                past_key_values=past_key_values,
+            )
+
+        _q35m_seg.Qwen3_5TextModel.forward = _segmented_text_forward
+        text_model._segment_ckpt_k = int(k)
+        if master:
+            n_layers = len(text_model.layers)
+            n_frames = (n_layers + int(k) - 1) // int(k)
+            print(f"segment checkpointing: every {k} of {n_layers} layers "
+                  f"({n_frames} frames, stash {n_layers}x160 MiB -> "
+                  f"{n_frames}x160 MiB; per-layer checkpointing disabled)",
+                  flush=True)
 
     tok = AutoTokenizer.from_pretrained(args.student)
 
@@ -608,7 +742,13 @@ def main() -> None:
             _p.data = _p.data.to(torch.bfloat16)
     if master:
         model.print_trainable_parameters()
-    model.gradient_checkpointing_enable()
+    if args.segment_ckpt_layers > 0:
+        # segment checkpointing requires per-layer checkpointing OFF: nesting
+        # per-layer frames inside the segment recompute would add a 3rd
+        # forward pass and rebuild the full per-layer stash anyway
+        _apply_segment_checkpointing(model, args.segment_ckpt_layers)
+    else:
+        model.gradient_checkpointing_enable()
     model.to(device)
     if args.ce_chunk_tokens > 0:
         if master:
