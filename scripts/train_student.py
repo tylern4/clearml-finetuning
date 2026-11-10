@@ -215,16 +215,18 @@ def main() -> None:
                          "MiB each at seq 16384, ~2.2 GiB live per layer "
                          "recompute -- the tensor the 40GB OOM died on) to "
                          "one chunk. 0 = stock MLP")
-    ap.add_argument("--segment-ckpt-layers", type=int, default=4,
+    ap.add_argument("--segment-ckpt-layers", type=int, default=2,
                     help="segment gradient checkpointing: checkpoint the text "
                          "backbone every N layers instead of every layer. "
-                         "Stock per-layer checkpointing saves ALL 64 layer "
-                         "inputs through backward (160 MiB each at seq 16384 "
-                         "= 10.7 GiB) and the config runs at ~39.4/39.5 GiB, "
-                         "so resumed runs OOM with nothing left to free; "
-                         "every-4th-layer saves 2.7 GiB of stash for one "
-                         "~2 GiB segment-recompute transient -- net ~6 GiB, "
-                         "same 2x compute. 0 = stock per-layer checkpointing")
+                         "Per-layer checkpointing holds all 64 layer inputs "
+                         "through backward (160 MiB each at seq 16384 = "
+                         "10.7 GiB); k layers per frame trades that stash "
+                         "for a k-layer recompute transient alive during "
+                         "backward. Measured on A100-40GB at the 16384 window "
+                         "(single 16k row): the 4-layer transient put the "
+                         "backward at the card edge (mapping OOM), so k=2 "
+                         "halves the transient for a 5.4 GiB stash. 0 = "
+                         "stock per-layer checkpointing")
     ap.add_argument("--out-dir", default="student_adapter")
     args = ap.parse_args()
 
@@ -932,32 +934,54 @@ def main() -> None:
                       f"{torch.cuda.memory_allocated()/2**30:.2f} GiB, max "
                       f"{torch.cuda.max_memory_allocated()/2**30:.2f}, dev "
                       f"free {_fr/2**30:.2f}", flush=True)
-            if is_ddp:
-                # ALL ranks must skip the micro-batch together: a single-rank
-                # skip would desync DDP's backward allreduce and hang the job
-                oom_t = torch.tensor([0 if out_loss is not None else 1],
-                                     device=device, dtype=torch.int32)
-                dist.all_reduce(oom_t, op=dist.ReduceOp.MAX)
-                if oom_t.item():
+            bw_oom = False
+            # ---- shared skip decision (forward OOM, backward OOM, or
+            # non-finite loss): a single-rank skip would desync DDP's
+            # backward allreduce, so the skip + grad-drop is agreed via an
+            # allreduce and executed identically on every rank
+            if out_loss is not None:
+                loss = out_loss / args.grad_accum
+                if not torch.isfinite(loss):
+                    # NaN/Inf loss poisons the already-allreduced grads on
+                    # every rank: drop the whole step's grads and skip
                     out_loss = None
+                    bw_oom = True
+                    if master:
+                        print(f"step {step} micro {mi}: non-finite loss "
+                              f"({loss.item()}), skipping", flush=True)
+                else:
+                    try:
+                        loss.backward()
+                    except torch.cuda.OutOfMemoryError as e:
+                        # the segment-recompute transient scales with row
+                        # length: a 16384-token row can OOM the backward even
+                        # when the forward fit
+                        bw_oom = True
+                        out_loss = None
+                        torch.cuda.empty_cache()
+                        print(f"rank {rank}: CUDA OOM in backward: "
+                              f"{str(e).splitlines()[0]}", flush=True)
+            if is_ddp:
+                # 0 = ok, 1 = skip micro (keep earlier grads), 2 = skip AND
+                # drop grads (backward ran and failed or loss was non-finite,
+                # so the allreduced grads are partial/poisoned on all ranks)
+                flag = torch.tensor(
+                    [0 if out_loss is not None else (2 if bw_oom else 1)],
+                    device=device, dtype=torch.int32)
+                dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+                if flag.item():
+                    out_loss = None
+                    bw_oom = flag.item() == 2
             if out_loss is None:
                 if master:
-                    print(f"step {step} micro {mi}: CUDA OOM in forward "
-                          f"(~{int(attn.sum().item())} tokens); skipping "
-                          f"micro-batch on all ranks", flush=True)
+                    print(f"step {step} micro {mi}: skipping micro-batch "
+                          f"(~{int(attn.sum().item())} tokens, "
+                          f"drop_grads={bw_oom}) on all ranks", flush=True)
+                if bw_oom:
+                    opt.zero_grad(set_to_none=True)
                 del input_ids, labels, attn
                 torch.cuda.empty_cache()
                 continue
-            loss = out_loss / args.grad_accum
-            if not torch.isfinite(loss):
-                # non-finite loss would poison the weights via NaN grads; skip
-                # this micro-batch entirely
-                if master:
-                    print(f"step {step} micro {mi}: non-finite loss "
-                          f"({loss.item()}), skipping", flush=True)
-                opt.zero_grad(set_to_none=True)
-                continue
-            loss.backward()
             if _bw_probe:
                 _bw_probe = False
                 _fr, _tot = torch.cuda.mem_get_info()
