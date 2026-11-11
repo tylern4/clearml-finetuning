@@ -115,12 +115,23 @@ def main() -> None:
         from vllm.lora.request import LoRARequest
 
     nproc = int(os.environ.get("NPROC", "4"))
-    if args.adapter_task and not os.path.isdir(args.adapter_dir):
-        local = cml.download_artifact(args.adapter_task, "student-adapter")
-        os.makedirs(os.path.dirname(args.adapter_dir) or ".", exist_ok=True)
-        os.rename(local, args.adapter_dir) if not os.path.exists(args.adapter_dir) else None
-    use_lora = os.path.isdir(args.adapter_dir) and os.path.exists(
-        os.path.join(args.adapter_dir, "adapter_config.json"))
+    use_lora = False
+    if args.adapter_task:
+        if not os.path.isdir(args.adapter_dir):
+            local = cml.download_artifact(args.adapter_task, "student-adapter")
+            os.makedirs(os.path.dirname(args.adapter_dir) or ".", exist_ok=True)
+            os.rename(local, args.adapter_dir) if not os.path.exists(args.adapter_dir) else None
+        use_lora = os.path.isdir(args.adapter_dir) and os.path.exists(
+            os.path.join(args.adapter_dir, "adapter_config.json"))
+        print(f"[eval] adapter: task={args.adapter_task} dir={args.adapter_dir} "
+              f"use_lora={use_lora}", flush=True)
+    else:
+        # A run without --adapter-task is a BASELINE: never let a leftover
+        # student_adapter/ dir from a previous task sharing this workspace
+        # silently turn it into an adapter run (this invalidated the epoch-1
+        # baseline: both evals scored identically because both used the LoRA).
+        print("[eval] adapter: none requested - baseline run, stale local "
+              "adapter dirs are ignored", flush=True)
 
     llm = LLM(
         model=args.student,
@@ -145,6 +156,12 @@ def main() -> None:
     sp.temperature = args.temperature
     sp.max_tokens = args.max_tokens
     outs = llm.generate(prompts_, sp, lora_request=lora_req)
+
+    # first-generation observability: a degenerate mode (plan-then-EOS, no
+    # code) previously went unnoticed until the 0.0 aggregate made it obvious
+    o0 = outs[0].outputs[0]
+    print(f"[eval] gen[0] finish={o0.finish_reason} head={o0.text[:160]!r}",
+          flush=True)
 
     passed = 0
     for p, out in zip(problems, outs):
