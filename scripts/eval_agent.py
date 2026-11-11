@@ -117,14 +117,45 @@ def main() -> None:
     nproc = int(os.environ.get("NPROC", "4"))
     use_lora = False
     if args.adapter_task:
-        if not os.path.isdir(args.adapter_dir):
+        # Versioned reuse: a leftover adapter dir from a previous task sharing
+        # this workspace must never masquerade as this task's adapter (the
+        # download was skipped whenever the dir existed). A marker file pins
+        # the dir to its source task; mismatch -> re-download.
+        marker = os.path.join(args.adapter_dir, ".adapter_task")
+        pinned = os.path.isdir(args.adapter_dir) and os.path.isfile(marker) \
+            and open(marker).read().strip() == args.adapter_task
+        if not pinned:
+            if os.path.isdir(args.adapter_dir):
+                print(f"[eval] adapter dir {args.adapter_dir} stale/unknown "
+                      f"provenance - re-downloading from {args.adapter_task}",
+                      flush=True)
+                shutil.rmtree(args.adapter_dir, ignore_errors=True)
             local = cml.download_artifact(args.adapter_task, "student-adapter")
             os.makedirs(os.path.dirname(args.adapter_dir) or ".", exist_ok=True)
-            os.rename(local, args.adapter_dir) if not os.path.exists(args.adapter_dir) else None
+            if os.path.exists(args.adapter_dir):
+                shutil.rmtree(args.adapter_dir, ignore_errors=True)
+            if os.path.isdir(local):
+                os.rename(local, args.adapter_dir)
+            else:
+                shutil.copytree(local, args.adapter_dir)
+            with open(marker, "w") as fh:
+                fh.write(args.adapter_task)
         use_lora = os.path.isdir(args.adapter_dir) and os.path.exists(
             os.path.join(args.adapter_dir, "adapter_config.json"))
+        cfg = {}
+        if use_lora:
+            try:
+                cfg = json.load(open(os.path.join(
+                    args.adapter_dir, "adapter_config.json")))
+            except Exception:
+                pass
+        weights = sorted(f for f in os.listdir(args.adapter_dir)
+                         if f.endswith(".safetensors")) if os.path.isdir(
+            args.adapter_dir) else []
         print(f"[eval] adapter: task={args.adapter_task} dir={args.adapter_dir} "
-              f"use_lora={use_lora}", flush=True)
+              f"use_lora={use_lora} r={cfg.get('r')} "
+              f"targets={cfg.get('target_modules')} weights={weights}",
+              flush=True)
     else:
         # A run without --adapter-task is a BASELINE: never let a leftover
         # student_adapter/ dir from a previous task sharing this workspace
